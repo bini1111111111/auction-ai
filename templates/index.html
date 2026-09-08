@@ -1,0 +1,61 @@
+
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>공매가 AI 4차</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f6fa;margin:0;color:#172033}
+.wrap{max-width:1080px;margin:24px auto;padding:0 16px}.card{background:#fff;border-radius:16px;padding:20px;margin:14px 0;box-shadow:0 3px 14px #0001}
+.g{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}label{font-size:13px;font-weight:700;display:block;margin-bottom:5px}
+input,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #d7dce5;border-radius:9px}
+button{background:#111827;color:#fff;border:0;border-radius:9px;padding:12px 16px;font-weight:750;cursor:pointer}.s{font-size:12px;color:#667085;line-height:1.55}
+.r{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.m{padding:14px;background:#f8fafc;border-radius:11px}.m b{display:block;font-size:20px;margin-top:6px}
+.warn{background:#fff7df;padding:12px;border-radius:10px}.ok{background:#edfdf3;padding:12px;border-radius:10px}
+table{width:100%;border-collapse:collapse}th,td{font-size:12px;padding:8px;border-bottom:1px solid #eee;text-align:left}
+@media(max-width:700px){.g,.r{grid-template-columns:1fr}}
+</style></head><body><div class="wrap">
+<h1>🚗 공매가 AI 4차 · 인터넷 연동형</h1>
+<p class="s">검색 API → 유사매물 가격 추출 → 이상값 제거 → 중앙값 계산 → 사고·주행거리·시장성 보정 → 공매가 산정</p>
+
+<div class="card"><h2>1. 차량정보</h2><div class="g">
+<div><label>차량명 / 트림</label><input id="car" placeholder="예: 쏘렌토 하이브리드 1.6 4WD 시그니처"></div>
+<div><label>연식</label><input id="year" type="number" value="2022"></div>
+<div><label>주행거리 km</label><input id="km" type="number" value="50000"></div>
+<div><label>사고 건수</label><input id="acc" type="number" value="0"></div>
+<div><label>사고 총액 (만원)</label><input id="aa" type="number" value="0"></div>
+<div><label>부품비 (만원)</label><input id="parts" type="number" value="0"></div>
+<div><label>자차 미가입</label><select id="un"><option value="0">없음</option><option value="1">1년 미만</option><option value="2">1~3년</option><option value="3">3년 이상</option></select></div>
+<div><label>용도 이력</label><select id="use"><option value="0">일반</option><option value="1">렌터카</option><option value="1.5">영업/상용</option></select></div>
+<div><label>골격손상</label><select id="frame"><option value="0">없음</option><option value="1">의심</option><option value="3">있음</option></select></div>
+<div><label>차량상태</label><select id="cond"><option value="0">양호</option><option value="1">보통</option><option value="2">상품화 필요</option></select></div>
+<div><label>시장성</label><select id="liq"><option value="0">높음</option><option value="1">보통</option><option value="2">낮음</option></select></div>
+<div><label>특수/특장차</label><select id="special"><option value="0">아님</option><option value="1">맞음</option></select></div>
+</div></div>
+
+<div class="card"><h2>2. 자동검색 보완용 수동 가격</h2>
+<p class="s">검색 API가 가격을 충분히 못 찾을 경우, 엔카/KB차차차에서 본 유사매물 가격을 쉼표로 입력해. 예: 3080,3150,3190,3250,3290</p>
+<input id="manual" placeholder="3080,3150,3190,3250,3290">
+<p class="warn s">현재 검색 공급자 설정: <b>{{ provider }}</b>. 환경변수 SEARCH_PROVIDER를 brave 또는 serpapi로 바꾸고 API 키를 넣으면 인터넷 자동검색이 켜져.</p>
+<button onclick="analyze()">인터넷 시세 조사 + 공매가 계산</button></div>
+
+<div class="card"><h2>3. 결과</h2><div id="out" class="s">차량정보를 입력하고 분석 버튼을 눌러줘.</div></div>
+</div>
+<script>
+const $=x=>document.getElementById(x),N=x=>Number($(x).value)||0;
+async function analyze(){
+ $('out').innerHTML='분석 중...';
+ let mp=$('manual').value.split(',').map(x=>Number(x.trim())).filter(x=>x>0);
+ let body={car:$('car').value,year:N('year'),km:N('km'),accident_count:N('acc'),accident_amount:N('aa'),parts_amount:N('parts'),
+ uninsured:N('un'),use_history:N('use'),frame:N('frame'),condition:N('cond'),liquidity:N('liq'),special:N('special'),manual_prices:mp};
+ try{
+  let r=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  let d=await r.json();
+  if(!d.ok){$('out').innerHTML='<div class="warn">'+d.message+'</div>';return}
+  let m=d.market,a=d.auction;
+  let rows=(d.search_results||[]).map(x=>'<tr><td>'+escapeHtml(x.title||'')+'</td><td>'+escapeHtml(x.description||'')+'</td></tr>').join('');
+  $('out').innerHTML='<div class="r"><div class="m">유사매물 수<b>'+m.count+'대</b></div><div class="m">대표 소매시세<b>'+m.median.toLocaleString()+'만원</b></div><div class="m">현실 공매가<b>'+a.auction_low.toLocaleString()+'~'+a.auction_high.toLocaleString()+'</b></div><div class="m">추천 입찰가<b>'+a.target.toLocaleString()+'만원</b></div></div><h3>절대 상한 '+a.upper.toLocaleString()+'만원 · '+a.verdict+'</h3><p>적용 할인율 '+a.discount_rate+'%</p><p>수집 가격: '+m.prices.join(', ')+'</p><h3>검색 결과 참고</h3><table><tr><th>제목</th><th>설명</th></tr>'+rows+'</table>';
+ }catch(e){$('out').innerHTML='<div class="warn">서버 연결 오류: '+escapeHtml(String(e))+'</div>'}
+}
+function escapeHtml(s){return s.replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]))}
+</script></body></html>
