@@ -4,15 +4,15 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from html import unescape
+from urllib.parse import urlparse
 import os, re, statistics, requests
 
-app = FastAPI(title="공매가 AI 5차")
+app = FastAPI(title="공매가 AI 6차")
 templates = Jinja2Templates(directory="templates")
 
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
-
 
 class Vehicle(BaseModel):
     car: str
@@ -29,737 +29,306 @@ class Vehicle(BaseModel):
     special: int = 0
     manual_prices: Optional[List[float]] = None
 
-
 def clean_text(s: str) -> str:
     s = unescape(s or "")
     s = re.sub(r"<[^>]+>", " ", s)
     s = re.sub(r"\s+", " ", s)
     return s.strip()
 
+def domain_of(url: str) -> str:
+    try:
+        return urlparse(url).netloc.lower().replace("www.", "")
+    except Exception:
+        return ""
 
 def search_web(query: str) -> List[Dict[str, str]]:
-    results: List[Dict[str, str]] = []
-
+    results = []
     if SEARCH_PROVIDER == "brave" and BRAVE_API_KEY:
         r = requests.get(
             "https://api.search.brave.com/res/v1/web/search",
-            headers={
-                "Accept": "application/json",
-                "X-Subscription-Token": BRAVE_API_KEY
-            },
-            params={
-                "q": query,
-                "count": 20,
-                "country": "kr",
-                "search_lang": "ko"
-            },
+            headers={"Accept": "application/json", "X-Subscription-Token": BRAVE_API_KEY},
+            params={"q": query, "count": 20, "country": "kr", "search_lang": "ko"},
             timeout=15,
         )
         r.raise_for_status()
-        data = r.json()
-
-        for x in data.get("web", {}).get("results", []):
+        for x in r.json().get("web", {}).get("results", []):
             results.append({
                 "title": clean_text(x.get("title", "")),
                 "url": x.get("url", ""),
                 "description": clean_text(x.get("description", "")),
+                "query": query,
             })
-
     elif SEARCH_PROVIDER == "serpapi" and SERPAPI_KEY:
         r = requests.get(
             "https://serpapi.com/search.json",
-            params={
-                "engine": "google",
-                "q": query,
-                "hl": "ko",
-                "gl": "kr",
-                "api_key": SERPAPI_KEY,
-                "num": 20
-            },
+            params={"engine":"google","q":query,"hl":"ko","gl":"kr","api_key":SERPAPI_KEY,"num":20},
             timeout=15,
         )
         r.raise_for_status()
-        data = r.json()
-
-        for x in data.get("organic_results", []):
+        for x in r.json().get("organic_results", []):
             results.append({
                 "title": clean_text(x.get("title", "")),
                 "url": x.get("link", ""),
                 "description": clean_text(x.get("snippet", "")),
+                "query": query,
             })
-
     return results
 
-
-def dedupe_results(results: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    seen = set()
-    out = []
-
+def dedupe_results(results):
+    seen, out = set(), []
     for x in results:
-        key = (x.get("url", ""), x.get("title", ""))
-
-        if key in seen:
+        url = (x.get("url") or "").split("#")[0].rstrip("/")
+        key = url or x.get("title", "")
+        if not key or key in seen:
             continue
-
         seen.add(key)
-        out.append(x)
-
+        y = dict(x)
+        y["url"] = url
+        y["domain"] = domain_of(url)
+        out.append(y)
     return out
 
-
-def build_queries(v: Vehicle) -> List[str]:
+def build_queries(v):
     km_man = max(1, round(v.km / 10000))
-
+    c = v.car.strip()
     return [
-        f'{v.year}년식 {v.car} {km_man}만km 중고차 판매 가격 만원',
-        f'{v.year} {v.car} 중고차 시세 가격',
+        f"{v.year}년식 {c} {km_man}만km 중고차 매물 가격",
+        f"{v.year} {c} {km_man}만 km 판매가",
+        f"site:encar.com {v.year} {c} {km_man}만",
+        f"site:kbchachacha.com {v.year} {c} {km_man}만",
+        f"site:kcar.com {v.year} {c} {km_man}만",
     ]
 
-
-def car_keywords(car: str) -> List[str]:
+def car_keywords(car):
     raw = re.findall(r"[가-힣A-Za-z0-9]+", (car or "").lower())
+    stop = {"가솔린","휘발유","디젤","경유","하이브리드","hev","lpg","lpi","전기","ev",
+            "2wd","4wd","awd","2륜","4륜","오토","자동","수동","터보",
+            "프리미엄","프레스티지","노블레스","시그니처","캘리그래피",
+            "인스퍼레이션","럭셔리","모던","스마트","스포츠","기본형","플러스","패키지","라인"}
+    return [t for t in raw if t not in stop and not re.fullmatch(r"20\d{2}", t) and (len(t)>=2 or re.search(r"\d",t))][:8]
 
-    stop = {
-        "가솔린", "휘발유", "디젤", "경유", "하이브리드", "hev",
-        "lpg", "lpi", "전기", "ev",
-        "2wd", "4wd", "awd", "2륜", "4륜",
-        "오토", "자동", "수동", "가솔린터보", "터보",
-        "프리미엄", "프레스티지", "노블레스", "시그니처",
-        "캘리그래피", "인스퍼레이션", "럭셔리",
-        "모던", "스마트", "스포츠", "기본형",
-        "플러스", "패키지", "라인",
-    }
-
-    out = []
-
-    for t in raw:
-        if t in stop or re.fullmatch(r"20\d{2}", t):
-            continue
-
-        if len(t) >= 2 or re.search(r"\d", t):
-            out.append(t)
-
-    return out[:6]
-
-
-def powertrain_group(car: str) -> Optional[List[str]]:
-    c = (car or "").lower().replace(" ", "")
-
-    if "하이브리드" in c or "hev" in c:
-        return ["하이브리드", "hev"]
-
-    if "디젤" in c or "경유" in c:
-        return ["디젤", "경유"]
-
-    if "lpg" in c or "lpi" in c or "엘피지" in c:
-        return ["lpg", "lpi", "엘피지"]
-
-    if "전기" in c or re.search(r"\bev\b", c):
-        return ["전기", "ev"]
-
-    if "가솔린" in c or "휘발유" in c:
-        return ["가솔린", "휘발유"]
-
+def powertrain_group(car):
+    c=(car or "").lower().replace(" ","")
+    if "하이브리드" in c or "hev" in c: return ["하이브리드","hev"]
+    if "디젤" in c or "경유" in c: return ["디젤","경유"]
+    if "lpg" in c or "lpi" in c or "엘피지" in c: return ["lpg","lpi","엘피지"]
+    if "전기" in c or re.search(r"\bev\b", c): return ["전기","ev"]
+    if "가솔린" in c or "휘발유" in c: return ["가솔린","휘발유"]
     return None
 
-
-def nearest_year(text: str, pos: int) -> Optional[int]:
-    matches = []
-
+def nearest_year(text,pos):
+    matches=[]
     for m in re.finditer(r"(?<!\d)(20\d{2})(?:\s*년식|\s*년)?", text):
-        y = int(m.group(1))
-        distance = min(abs(m.start() - pos), abs(m.end() - pos))
-
-        if distance <= 80:
-            matches.append((distance, y))
-
+        y=int(m.group(1)); d=min(abs(m.start()-pos),abs(m.end()-pos))
+        if d<=90: matches.append((d,y))
     return min(matches)[1] if matches else None
 
+def mileage_values(text):
+    vals=[]
+    for m in re.finditer(r"(?<!\d)(\d{1,3}(?:,\d{3})+)\s*(?:km|㎞|키로)", text, re.I):
+        try: vals.append(int(m.group(1).replace(",","")))
+        except: pass
+    for m in re.finditer(r"(?<!\d)(\d{1,2}(?:\.\d+)?)\s*만\s*(?:km|㎞|키로)", text, re.I):
+        try: vals.append(int(float(m.group(1))*10000))
+        except: pass
+    return vals
 
-def mileage_from_text(text: str) -> Optional[int]:
-    vals = []
+def nearest_mileage(text,target):
+    vals=mileage_values(text)
+    return min(vals,key=lambda x:abs(x-target)) if vals else None
 
-    for m in re.finditer(
-        r"(?<!\d)(\d{1,3}(?:,\d{3})+)\s*(?:km|㎞|키로)",
-        text,
-        re.I
-    ):
-        try:
-            vals.append(int(m.group(1).replace(",", "")))
-        except ValueError:
-            pass
-
-    for m in re.finditer(
-        r"(?<!\d)(\d{1,2}(?:\.\d+)?)\s*만\s*(?:km|㎞|키로)",
-        text,
-        re.I
-    ):
-        try:
-            vals.append(int(float(m.group(1)) * 10000))
-        except ValueError:
-            pass
-
-    return vals[0] if vals else None
-
-
-def price_floor(year: int) -> int:
-    if year >= 2024:
-        return 700
-
-    if year >= 2020:
-        return 500
-
-    if year >= 2015:
-        return 300
-
+def price_floor(year):
+    if year>=2025: return 900
+    if year>=2022: return 650
+    if year>=2019: return 450
+    if year>=2015: return 280
     return 150
 
+def source_type(text, domain):
+    listing_domains=("encar.com","kbchachacha.com","kcar.com","autowini.com","bobaedream.co.kr")
+    if any(d in domain for d in listing_domains): return "listing"
+    listing_terms=["주행거리","km","차량번호","판매중","매물","판매가","성능점검","등록일","연식"]
+    guide_terms=["시세표","가격표","구매 가이드","구매가이드","가격 시세","연식별","중고 시세","시세 조회","가격 조회","총정리","비교"]
+    lh=sum(1 for x in listing_terms if x in text)
+    gh=sum(1 for x in guide_terms if x in text)
+    if lh>=2 and gh==0: return "listing"
+    if gh>=1: return "reference"
+    return "unknown"
 
-def extract_price_candidates(
-    results: List[Dict[str, str]],
-    v: Vehicle
-):
-    accepted: List[Dict[str, Any]] = []
-    rejected: List[Dict[str, Any]] = []
+def extract_candidates(results,v):
+    accepted=[]; rejected=[]
+    patt=re.compile(r"(?<![\d,])(\d{1,3}(?:,\d{3})+|\d{3,5})\s*만\s*원")
+    kws=car_keywords(v.car); pt=powertrain_group(v.car); floor=price_floor(v.year)
+    bad=["월납","월 납","월렌트","월 렌트","월리스","월 리스","보증금","선수금","지원금","취등록","보험료","수리비","부품비","사고비","계약금","할인","혜택","캐시백","리스료","렌트료"]
 
-    price_pattern = re.compile(
-        r"(?<![\d,])(\d{1,3}(?:,\d{3})+|\d{3,5})\s*만\s*원"
-    )
+    for idx,x in enumerate(results):
+        title=clean_text(x.get("title","")); desc=clean_text(x.get("description",""))
+        domain=x.get("domain",""); text=f"{title} {desc}".lower()
+        stype=source_type(text,domain); km=nearest_mileage(text,v.km)
+        kw_hits=sum(1 for k in kws if k in text)
+        pt_match=True if not pt else any(term in text for term in pt)
+        model_ok=kw_hits>=1 if kws else True
+        per_url=[]
 
-    keywords = car_keywords(v.car)
-    pt = powertrain_group(v.car)
-    floor = price_floor(v.year)
+        for m in patt.finditer(text):
+            price=int(m.group(1).replace(",",""))
+            start,end=m.span(); context=text[max(0,start-90):min(len(text),end+90)]
+            yr=nearest_year(text,start); reason=None
+            if price<floor: reason=f"가격 하한({floor}만원) 미만"
+            elif price>30000: reason="비현실적 고가"
+            elif any(term in context for term in bad): reason="월납/보증금/할인·비용성 금액"
+            elif not model_ok: reason="차종 유사도 부족"
+            elif pt and not pt_match: reason="동력원 불일치"
+            elif yr and abs(yr-v.year)>=2: reason=f"연식 불일치({yr})"
 
-    bad_terms = [
-        "월납", "월 납",
-        "월렌트", "월 렌트",
-        "월리스", "월 리스",
-        "보증금", "선수금",
-        "지원금", "취등록",
-        "보험료", "수리비",
-        "부품비", "사고비",
-        "계약금", "할인",
-        "혜택", "캐시백",
-    ]
+            score=min(kw_hits,4)*2
+            score += 5 if stype=="listing" else (-2 if stype=="reference" else 0)
+            score += 6 if yr==v.year else (3 if yr and abs(yr-v.year)==1 else (1 if yr is None else 0))
+            if pt and pt_match: score+=3
+            if km:
+                diff=abs(km-v.km)
+                score += 5 if diff<=15000 else (3 if diff<=30000 else (1 if diff<=50000 else (-2 if diff>=90000 else 0)))
+            if any(term in context for term in ["판매가","차량가","매물","판매중"]): score+=2
 
-    good_terms = [
-        "판매", "판매가",
-        "가격", "시세",
-        "매물", "중고",
-        "차량가", "년식",
-        "만원"
-    ]
+            rec={"price":price,"year":yr,"score":score,"mileage":km,"title":title,"url":x.get("url",""),
+                 "domain":domain,"reason":reason or "채택","source_type":stype,"target_year":v.year,"target_km":v.km}
+            if reason is None: per_url.append(rec)
+            else: rejected.append(rec)
 
-    for idx, x in enumerate(results):
-        title = clean_text(x.get("title", ""))
-        desc = clean_text(x.get("description", ""))
-
-        text = f"{title} {desc}".lower()
-
-        result_mileage = mileage_from_text(text)
-
-        kw_hits = sum(
-            1 for k in keywords
-            if k.lower() in text
-        )
-
-        has_target_year = str(v.year) in text
-
-        pt_match = True
-
-        if pt:
-            pt_match = any(term in text for term in pt)
-
-        conflict = False
-
-        if pt:
-            other_groups = [
-                ["하이브리드", "hev"],
-                ["디젤", "경유"],
-                ["lpg", "lpi", "엘피지"],
-                ["가솔린", "휘발유"]
-            ]
-
-            for g in other_groups:
-                if g == pt:
-                    continue
-
-                if any(term in text for term in g) and not pt_match:
-                    conflict = True
-                    break
-
-        for m in price_pattern.finditer(text):
-            raw = m.group(1)
-
-            try:
-                price = int(raw.replace(",", ""))
-            except ValueError:
-                continue
-
-            start, end = m.span()
-
-            context = text[
-                max(0, start - 75):
-                min(len(text), end + 75)
-            ]
-
-            assoc_year = nearest_year(text, start)
-
-            reason = None
-
-            if price < floor:
-                reason = f"가격 하한({floor}만원) 미만"
-
-            elif price > 30000:
-                reason = "비현실적 고가"
-
-            elif any(term in context for term in bad_terms):
-                reason = "월납/보증금/할인·비용성 금액"
-
-            elif assoc_year and abs(assoc_year - v.year) >= 2:
-                reason = f"연식 불일치({assoc_year})"
-
-            elif conflict:
-                reason = "동력원 불일치"
-
-            elif not any(term in context for term in good_terms):
-                reason = "차량 판매가격 문맥 부족"
-
-            score = 1
-
-            score += min(kw_hits, 3)
-
-            if has_target_year:
-                score += 1
-
-            if pt_match and pt:
-                score += 3
-
-            if assoc_year == v.year:
-                score += 5
-
-            elif assoc_year and abs(assoc_year - v.year) == 1:
-                score += 2
-
-            elif assoc_year is None:
-                score += 1
-
-            if any(
-                term in context
-                for term in [
-                    "판매가",
-                    "차량가",
-                    "중고차 가격",
-                    "시세"
-                ]
-            ):
-                score += 1
-
-            if result_mileage:
-                diff = abs(result_mileage - v.km)
-
-                if diff <= 20000:
-                    score += 2
-
-                elif diff <= 40000:
-                    score += 1
-
-                elif diff >= 80000:
-                    score -= 1
-
-            rec = {
-                "price": price,
-                "year": assoc_year,
-                "score": score,
-                "mileage": result_mileage,
-                "title": title,
-                "url": x.get("url", ""),
-                "context": context[:180],
-                "reason": reason or "채택",
-                "source_index": idx,
-            }
-
-            if reason is None and score >= 4:
-                accepted.append(rec)
-
+        if per_url:
+            best=sorted(per_url,key=lambda c:(-c["score"], 99 if c["year"] is None else abs(c["year"]-v.year),
+                                              999999 if c["mileage"] is None else abs(c["mileage"]-v.km)))[0]
+            min_score=7 if best["source_type"]=="listing" else 9
+            if best["score"]>=min_score:
+                accepted.append(best)
+                for extra in per_url[1:]:
+                    extra=dict(extra); extra["reason"]="동일 URL의 보조 가격"; rejected.append(extra)
             else:
-                if reason is None:
-                    rec["reason"] = "유사도 점수 부족"
+                best=dict(best); best["reason"]="유사도 점수 부족"; rejected.append(best)
+    return accepted,rejected
 
-                rejected.append(rec)
+def normalize_year(price,source_year,target_year):
+    if not source_year or source_year==target_year: return float(price)
+    diff=source_year-target_year
+    return price*(0.95**diff) if diff>0 else price*(1.05**(-diff))
 
-    uniq = {}
-
-    for c in accepted:
-        key = (
-            c["url"],
-            c["price"],
-            c.get("year")
-        )
-
-        if key not in uniq or c["score"] > uniq[key]["score"]:
-            uniq[key] = c
-
-    accepted = list(uniq.values())
-
-    return accepted, rejected
-
-
-def normalize_to_target_year(
-    price: float,
-    source_year: Optional[int],
-    target_year: int
-) -> float:
-
-    if not source_year or source_year == target_year:
-        return float(price)
-
-    diff = source_year - target_year
-
-    if diff > 0:
-        return price * (0.95 ** diff)
-
-    return price * (1.05 ** (-diff))
-
+def adjust_km(price,source_km,target_km):
+    if not source_km: return price
+    diff=target_km-source_km
+    rate=max(-0.08,min(0.08,-(diff/10000)*0.012))
+    return price*(1+rate)
 
 def weighted_median(values):
-    if not values:
-        return None
-
-    arr = sorted(values, key=lambda x: x[0])
-
-    total = sum(w for _, w in arr)
-
-    acc = 0
-
-    for value, weight in arr:
-        acc += weight
-
-        if acc >= total / 2:
-            return value
-
+    arr=sorted(values,key=lambda x:x[0]); total=sum(w for _,w in arr); acc=0
+    for value,weight in arr:
+        acc+=weight
+        if acc>=total/2: return value
     return arr[-1][0]
 
+def robust_market(cands):
+    if not cands: return None
+    listing=[c for c in cands if c["source_type"]=="listing"]
+    reference=[c for c in cands if c["source_type"]!="listing"]
+    working=listing if len(listing)>=3 else listing+reference
 
-def robust_market(candidates: List[Dict[str, Any]]):
-    if not candidates:
-        return None
+    enriched=[]
+    for c in working:
+        adj=normalize_year(c["price"],c.get("year"),c["target_year"])
+        adj=adjust_km(adj,c.get("mileage"),c["target_km"])
+        cc=dict(c); cc["adjusted_price"]=round(adj); enriched.append(cc)
 
-    enriched = []
-
-    for c in candidates:
-        adj = normalize_to_target_year(
-            c["price"],
-            c.get("year"),
-            c["target_year"]
-        )
-
-        cc = dict(c)
-        cc["adjusted_price"] = round(adj)
-
-        enriched.append(cc)
-
-    vals = [
-        c["adjusted_price"]
-        for c in enriched
-    ]
-
-    med = statistics.median(vals)
-
-    abs_dev = [
-        abs(x - med)
-        for x in vals
-    ]
-
-    mad = (
-        statistics.median(abs_dev)
-        if abs_dev
-        else 0
-    )
-
-    filtered = []
-    outliers = []
-
+    vals=[c["adjusted_price"] for c in enriched]
+    med=statistics.median(vals); mad=statistics.median([abs(x-med) for x in vals]) if vals else 0
+    filtered=[]; out=[]
     for c in enriched:
-        p = c["adjusted_price"]
-
-        ratio_ok = (
-            med * 0.65
-            <= p
-            <= med * 1.35
-        )
-
-        mad_ok = (
-            True
-            if mad == 0
-            else abs(p - med)
-            <= max(3 * mad, med * 0.18)
-        )
-
-        if ratio_ok and mad_ok:
+        p=c["adjusted_price"]
+        if med*0.72<=p<=med*1.28 and (mad==0 or abs(p-med)<=max(3*mad,med*0.16)):
             filtered.append(c)
-
         else:
-            cc = dict(c)
-            cc["reason"] = "통계적 이상값"
-            outliers.append(cc)
+            cc=dict(c); cc["reason"]="통계적 이상값"; out.append(cc)
+    if not filtered: filtered=enriched; out=[]
 
-    if not filtered:
-        filtered = enriched
-        outliers = []
-
-    wm = weighted_median([
-        (
-            c["adjusted_price"],
-            max(1, c["score"])
-        )
-        for c in filtered
-    ])
-
-    prices = sorted(
-        c["adjusted_price"]
-        for c in filtered
-    )
-
-    if len(prices) >= 4:
-        low = round(
-            statistics.quantiles(
-                prices,
-                n=4,
-                method="inclusive"
-            )[0]
-        )
-
-        high = round(
-            statistics.quantiles(
-                prices,
-                n=4,
-                method="inclusive"
-            )[2]
-        )
-
+    wm=weighted_median([(c["adjusted_price"],max(1,c["score"])*(2 if c["source_type"]=="listing" else 1)) for c in filtered])
+    prices=sorted(c["adjusted_price"] for c in filtered)
+    if len(prices)>=4:
+        q=statistics.quantiles(prices,n=4,method="inclusive"); low,high=round(q[0]),round(q[2])
     else:
-        low = min(prices)
-        high = max(prices)
+        low,high=min(prices),max(prices)
 
-    return {
-        "count": len(filtered),
-        "low": int(low),
-        "high": int(high),
-        "median": int(round(wm)),
-        "prices": prices[:30],
-        "adopted": sorted(
-            filtered,
-            key=lambda c: (
-                -c["score"],
-                abs(c["adjusted_price"] - wm)
-            )
-        )[:20],
-        "outliers": outliers[:20],
-    }
+    lc=sum(1 for c in filtered if c["source_type"]=="listing")
+    rc=len(filtered)-lc
+    conf="높음" if lc>=5 else ("보통" if lc>=3 else ("낮음" if len(filtered)>=3 else "매우 낮음"))
 
+    return {"count":len(filtered),"listing_count":lc,"reference_count":rc,"confidence":conf,
+            "median":int(round(wm)),"low":int(low),"high":int(high),"prices":prices[:30],
+            "adopted":sorted(filtered,key=lambda c:(0 if c["source_type"]=="listing" else 1,-c["score"],abs(c["adjusted_price"]-wm)))[:20],
+            "outliers":out[:20]}
 
-def calc_auction(
-    v: Vehicle,
-    market_mid: float
-):
-    d = 10.5
-    km = v.km
+def base_discount(v):
+    age=max(0,2026-v.year)
+    if age<=1 and v.km<=30000: return 13.5
+    if age<=3 and v.km<=60000: return 15.0
+    return 17.0
 
-    if km > 180000:
-        d += 6
+def calc_auction(v,market_mid):
+    d=base_discount(v)
+    km=v.km
+    if km>180000: d+=6
+    elif km>150000: d+=5
+    elif km>120000: d+=4
+    elif km>100000: d+=3
+    elif km>80000: d+=1.5
+    elif km<30000: d-=0.5
 
-    elif km > 150000:
-        d += 5
+    d+=min(v.accident_count*0.8,4)
+    aa=v.accident_amount
+    if aa>=1500: d+=6
+    elif aa>=1000: d+=5
+    elif aa>=700: d+=4
+    elif aa>=500: d+=2.5
+    elif aa>=300: d+=1.5
+    elif aa>=150: d+=0.7
 
-    elif km > 120000:
-        d += 3
+    p=v.parts_amount
+    if p>=900: d+=4
+    elif p>=700: d+=3
+    elif p>=500: d+=2.5
+    elif p>=300: d+=1.5
+    elif p>=150: d+=0.7
 
-    elif km > 100000:
-        d += 2
-
-    elif km < 30000:
-        d -= 1
-
-    d += min(
-        v.accident_count * 0.8,
-        4
-    )
-
-    aa = v.accident_amount
-
-    if aa >= 1200:
-        d += 5
-
-    elif aa >= 900:
-        d += 4
-
-    elif aa >= 700:
-        d += 3
-
-    elif aa >= 500:
-        d += 2
-
-    elif aa >= 300:
-        d += 1
-
-    p = v.parts_amount
-
-    if p >= 700:
-        d += 3.5
-
-    elif p >= 500:
-        d += 2.5
-
-    elif p >= 300:
-        d += 1.5
-
-    elif p >= 150:
-        d += 0.7
-
-    d += v.uninsured
-    d += v.use_history * 1.5
-    d += v.frame * 3
-    d += v.condition * 1.2
-    d += v.liquidity * 1.5
-    d += v.special * 1.5
-
-    d = max(
-        7,
-        min(30, d)
-    )
-
-    auction = market_mid * (
-        1 - d / 100
-    )
-
-    spread = max(
-        50,
-        auction * 0.045
-    )
-
-    low = round(
-        (auction - spread) / 10
-    ) * 10
-
-    high = round(
-        (auction + spread) / 10
-    ) * 10
-
-    target = round(
-        auction / 10
-    ) * 10
-
-    upper = round(
-        (auction + spread * 1.35) / 10
-    ) * 10
-
-    if target / market_mid >= .88:
-        verdict = "매입 검토 가능"
-
-    elif target / market_mid >= .82:
-        verdict = "조건부 검토"
-
-    else:
-        verdict = "보수적 접근"
-
-    return {
-        "discount_rate": round(d, 1),
-        "auction_low": int(low),
-        "auction_high": int(high),
-        "target": int(target),
-        "upper": int(upper),
-        "verdict": verdict,
-    }
-
+    d+=v.uninsured+v.use_history*1.7+v.frame*3.5+v.condition*1.3+v.liquidity*1.5+v.special*1.5
+    d=max(10,min(35,d))
+    auction=market_mid*(1-d/100); spread=max(50,auction*0.045)
+    low=round((auction-spread)/10)*10; high=round((auction+spread)/10)*10
+    target=round(auction/10)*10; upper=round((auction+spread*1.25)/10)*10
+    verdict="보수적 접근" if d>=25 else ("조건부 검토" if d>=20 else "매입 검토 가능")
+    return {"discount_rate":round(d,1),"auction_low":int(low),"auction_high":int(high),
+            "target":int(target),"upper":int(upper),"verdict":verdict}
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
-            "provider": SEARCH_PROVIDER
-        }
-    )
-
+    return templates.TemplateResponse("index.html", {"request": request, "provider": SEARCH_PROVIDER})
 
 @app.post("/api/analyze")
 def analyze(v: Vehicle):
-    queries = build_queries(v)
-
-    web_results: List[Dict[str, str]] = []
-    search_errors = []
-
+    web=[]; errors=[]
+    queries=build_queries(v)
     for q in queries:
-        try:
-            web_results.extend(
-                search_web(q)
-            )
-
-        except Exception as e:
-            search_errors.append(
-                str(e)
-            )
-
-    web_results = dedupe_results(
-        web_results
-    )
-
-    accepted, rejected = (
-        extract_price_candidates(
-            web_results,
-            v
-        )
-    )
-
-    for c in accepted:
-        c["target_year"] = v.year
+        try: web.extend(search_web(q))
+        except Exception as e: errors.append(str(e))
+    web=dedupe_results(web)
+    accepted,rejected=extract_candidates(web,v)
 
     if v.manual_prices:
         for x in v.manual_prices:
-            if x and x > 0:
-                accepted.append({
-                    "price": float(x),
-                    "year": v.year,
-                    "score": 10,
-                    "mileage": v.km,
-                    "title": "수동 입력 가격",
-                    "url": "",
-                    "context": "사용자가 직접 입력한 유사매물 가격",
-                    "reason": "채택",
-                    "source_index": -1,
-                    "target_year": v.year,
-                })
+            if x and x>0:
+                accepted.append({"price":float(x),"year":v.year,"score":20,"mileage":v.km,
+                                 "title":"수동 입력 유사매물","url":"","domain":"","reason":"채택",
+                                 "source_type":"listing","target_year":v.year,"target_km":v.km})
 
-    market = robust_market(
-        accepted
-    )
-
+    market=robust_market(accepted)
     if not market:
-        return JSONResponse({
-            "ok": False,
-            "message":
-                "자동 검색에서 신뢰할 만한 차량 판매가격을 충분히 찾지 못했어. "
-                "차량명/트림을 더 정확히 입력하거나 유사매물 가격을 "
-                "수동으로 3개 이상 입력해줘.",
-            "queries": queries,
-            "search_results": web_results[:12],
-            "rejected": rejected[:20],
-            "search_errors": search_errors,
-        })
-
-    auction = calc_auction(
-        v,
-        market["median"]
-    )
-
-    return {
-        "ok": True,
-        "queries": queries,
-        "market": market,
-        "auction": auction,
-        "search_results": web_results[:12],
-        "rejected": rejected[:20],
-        "search_errors": search_errors,
-    }
+        return JSONResponse({"ok":False,"message":"신뢰할 만한 유사매물 가격을 충분히 찾지 못했어. 차량명/트림을 더 정확히 입력하거나 실제 유사매물 가격을 수동으로 3개 이상 입력해줘.",
+                             "queries":queries,"search_results":web[:20],"rejected":rejected[:30],"search_errors":errors})
+    return {"ok":True,"queries":queries,"market":market,"auction":calc_auction(v,market["median"]),
+            "search_results":web[:20],"rejected":rejected[:30],"search_errors":errors}
