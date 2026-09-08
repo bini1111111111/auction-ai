@@ -202,7 +202,7 @@ def mileage_from_text(text: str) -> Optional[int]:
     return vals[0] if vals else None
 
 
-def price_floor(year: int) -> int:근
+def price_floor(year: int) -> int:
     if year >= 2024:
         return 700
 
