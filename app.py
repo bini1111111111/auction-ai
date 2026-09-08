@@ -195,7 +195,7 @@ def mileage_from_text(text: str) -> Optional[int]:
         re.I
     ):
         try:
-            vals.append(int(float(m.group(1)) * 10000)
+            vals.append(int(float(m.group(1)) * 10000))
         except ValueError:
             pass
 
