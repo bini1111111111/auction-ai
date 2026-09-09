@@ -7,7 +7,7 @@ from html import unescape
 from urllib.parse import urlparse
 import os, re, statistics, requests
 
-app = FastAPI(title="공매가 AI 8차")
+app = FastAPI(title="공매가 AI 8.2차")
 templates = Jinja2Templates(directory="templates")
 
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
@@ -92,14 +92,48 @@ def build_queries(v):
     km_man = max(1, round(v.km / 10000))
     c = v.car.strip()
     return [
-        f'{v.year}년식 {c} {km_man}만km 중고차 매물 판매가',
-        f'{v.year} {c} {km_man}만 km 중고차 가격',
-        f'{v.year-1} {c} {km_man}만 km 중고차 매물',
-        f'{v.year+1} {c} {km_man}만 km 중고차 매물',
-        f'site:encar.com {v.year} {c} {km_man}만',
-        f'site:kbchachacha.com {v.year} {c} {km_man}만',
-        f'site:kcar.com {v.year} {c} {km_man}만',
+        f'"{c}" {v.year} {km_man}만km 중고차 매물',
+        f'{v.year}년식 {c} {km_man}만km 판매가',
+        f'site:encar.com {v.year} "{c}" {km_man}만km',
+        f'site:kbchachacha.com {v.year} "{c}" {km_man}만km',
+        f'site:kcar.com {v.year} "{c}" {km_man}만km',
     ]
+
+def build_expanded_queries(v):
+    """1차 결과에서 검증 개별매물이 3건 미만일 때만 추가 검색."""
+    c = v.car.strip()
+    target = max(1, round(v.km / 10000))
+    bands = sorted(set([
+        max(1, target-4), max(1, target-2), target,
+        target+2, target+4
+    ]))
+    qs = []
+
+    # 목표 연식 ±1년 × 주행거리 구간
+    for y in (v.year-1, v.year, v.year+1):
+        for km_man in bands:
+            qs.append(f'{y} "{c}" {km_man}만km 중고차 매물 가격')
+
+    # 주요 플랫폼별 상세 매물 탐색
+    for domain in ("encar.com", "kbchachacha.com", "kcar.com"):
+        for y in (v.year-1, v.year, v.year+1):
+            qs.append(f'site:{domain} {y} "{c}" 중고차 {target}만km')
+
+    # 표현 차이 대응
+    qs += [
+        f'"{c}" "{v.year}년식" 중고차 판매 {target}만',
+        f'"{c}" "{v.year}년형" 중고차 {target}만km 가격',
+        f'"{c}" "최초등록 {v.year}" {target}만km',
+        f'{c} {v.year} 중고차 실매물 {target}만km',
+    ]
+
+    # 중복 제거
+    seen, out = set(), []
+    for q in qs:
+        if q not in seen:
+            seen.add(q)
+            out.append(q)
+    return out
 
 def car_keywords(car):
     raw = re.findall(r"[가-힣A-Za-z0-9]+", (car or "").lower())
@@ -520,7 +554,9 @@ def analyze(v: Vehicle):
     web=[]
     errors=[]
     queries=build_queries(v)
+    expanded_used=False
 
+    # 1차 검색
     for q in queries:
         try:
             web.extend(search_web(q))
@@ -530,13 +566,40 @@ def analyze(v: Vehicle):
     web=dedupe_results(web)
     accepted,rejected=extract_candidates(web,v)
 
+    def verified_listing_count(items):
+        return sum(
+            1 for c in items
+            if c.get("source_type")=="listing"
+            and c.get("year") is not None
+            and c.get("mileage") is not None
+        )
+
+    # 8.2차: 실제 검증 개별매물이 3건 미만일 때만 확장 검색
+    if verified_listing_count(accepted) < 3:
+        expanded_used=True
+        extra_queries=build_expanded_queries(v)
+        existing=set(queries)
+        extra_queries=[q for q in extra_queries if q not in existing]
+
+        # API 과소비를 막으면서도 검색 폭은 충분히 확대
+        for q in extra_queries[:18]:
+            try:
+                web.extend(search_web(q))
+            except Exception as e:
+                errors.append(str(e))
+        queries += extra_queries[:18]
+
+        web=dedupe_results(web)
+        accepted,rejected=extract_candidates(web,v)
+
     if v.manual_prices:
         for x in v.manual_prices:
             if x and x>0:
                 accepted.append({
-                    "price":float(x),"year":v.year,"score":20,"mileage":v.km,
+                    "price":float(x),"year":v.year,"score":30,"mileage":v.km,
                     "title":"수동 입력 유사매물","url":"","domain":"",
-                    "reason":"채택","source_type":"listing","target_year":v.year,"target_km":v.km
+                    "reason":"사용자 확인 매물","source_type":"listing",
+                    "target_year":v.year,"target_km":v.km
                 })
 
     market=robust_market(accepted)
@@ -544,21 +607,37 @@ def analyze(v: Vehicle):
     if not market:
         return JSONResponse({
             "ok":False,
-            "message":"조건에 맞는 비교매물을 충분히 찾지 못했어. 차량명/트림을 더 정확히 입력하거나 실제 유사매물 가격을 수동으로 3개 이상 입력해줘.",
+            "message":"조건에 맞는 실제 비교매물을 찾지 못했어. 차량명/트림을 더 정확히 입력하거나 실제 유사매물 가격을 수동으로 입력해줘.",
             "queries":queries,
-            "search_results":web[:25],
-            "rejected":rejected[:35],
+            "expanded_search":expanded_used,
+            "search_results":web[:40],
+            "rejected":rejected[:50],
             "search_errors":errors
         })
 
+    # 8.2차 안전장치:
+    # 실제 개별매물 3건 + 연식/주행거리 확인 3건이 아니면
+    # 공매가 숫자를 '확정'으로 취급하지 않는다.
+    insufficient = (
+        market["listing_count"] < 3
+        or market["exact_meta_count"] < 3
+    )
+    market["market_status"] = "시세 확정 불가" if insufficient else (
+        "잠정 시세" if market["provisional"] else "시세 확정"
+    )
+
     auction=calc_auction(v,market["median"])
+    if insufficient:
+        auction["verdict"] = "비교매물 부족 · 공매가 확정 불가"
 
     return {
         "ok":True,
         "queries":queries,
+        "expanded_search":expanded_used,
         "market":market,
         "auction":auction,
-        "search_results":web[:25],
-        "rejected":rejected[:35],
+        "search_results":web[:40],
+        "rejected":rejected[:50],
         "search_errors":errors
     }
+
