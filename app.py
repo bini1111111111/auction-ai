@@ -7,7 +7,7 @@ from html import unescape
 from urllib.parse import urlparse
 import os, re, statistics, requests
 
-app = FastAPI(title="공매가 AI 7차")
+app = FastAPI(title="공매가 AI 8차")
 templates = Jinja2Templates(directory="templates")
 
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
@@ -118,14 +118,33 @@ def powertrain_group(car):
     if "가솔린" in c or "휘발유" in c: return ["가솔린","휘발유"]
     return None
 
-def nearest_year(text,pos):
+def _normalize_2digit_year(y2: int, target_year: int):
+    # 중고차 검색에서 17년식, 21년형처럼 2자리 연식 표기가 흔함
+    candidates=[1900+y2, 2000+y2]
+    return min(candidates, key=lambda y: abs(y-target_year))
+
+def nearest_year(text, pos, target_year):
     matches=[]
-    for m in re.finditer(r"(?<!\d)(20\d{2})(?:\s*년식|\s*년)?", text):
-        y=int(m.group(1))
-        d=min(abs(m.start()-pos),abs(m.end()-pos))
-        if d<=90:
-            matches.append((d,y))
-    return min(matches)[1] if matches else None
+
+    # 2021년식 / 2021년형 / 2021년 / 최초등록 2021
+    patterns=[
+        r"(?<!\d)(20\d{2})\s*(?:년식|년형|년|MY)?",
+        r"(?:최초등록|등록연월|등록일|연식)\s*[:：]?\s*(20\d{2})",
+        r"(?<!\d)(\d{2})\s*(?:년식|년형)",
+        r"(?:최초등록|등록연월|연식)\s*[:：]?\s*(\d{2})\s*년",
+    ]
+
+    for pi,pat in enumerate(patterns):
+        for m in re.finditer(pat,text,re.I):
+            raw=int(m.group(1))
+            y=raw if raw>=1900 else _normalize_2digit_year(raw,target_year)
+            d=min(abs(m.start()-pos),abs(m.end()-pos))
+            # 가격과 다소 떨어져 있어도 같은 검색 snippet 안의 연식이면 인정
+            if d<=180:
+                bonus=0 if pi<2 else 8
+                matches.append((d+bonus,abs(y-target_year),y))
+
+    return min(matches)[2] if matches else None
 
 def mileage_values(text):
     vals=[]
@@ -148,21 +167,45 @@ def price_floor(year):
     if year>=2015: return 280
     return 150
 
-def source_type(text, domain):
-    listing_domains=("encar.com","kbchachacha.com","kcar.com","autowini.com","bobaedream.co.kr")
-    if any(d in domain for d in listing_domains):
-        return "listing"
+def is_specific_listing_url(url: str, domain: str) -> bool:
+    u=(url or "").lower()
+    d=(domain or "").lower()
 
-    listing_terms=["주행거리","km","차량번호","판매중","매물","판매가","성능점검","등록일","연식","최초등록"]
+    # 플랫폼의 실제 차량 상세주소에서 자주 쓰는 패턴들
+    detail_patterns={
+        "encar.com":["cardetail", "carid=", "/cars/detail", "/detail/"],
+        "kbchachacha.com":["carseq=", "/public/car/detail", "/car/detail", "detail.kbc"],
+        "kcar.com":["carinfodtl", "scarcd=", "/car/detail", "/detail/"],
+        "bobaedream.co.kr":["mycar_view", "no=", "/cyber/cview"],
+        "autowini.com":["vehicle/", "/detail/"],
+    }
+    for host,pats in detail_patterns.items():
+        if host in d and any(p in u for p in pats):
+            return True
+    return False
+
+def source_type(text, domain, url="", year=None, km=None):
     guide_terms=["시세표","가격표","구매 가이드","구매가이드","가격 시세","연식별","중고 시세","시세 조회",
-                 "가격 조회","총정리","비교","전망","평균","모델별"]
+                 "가격 조회","총정리","비교","전망","평균","모델별","국내 매물 대수","중고차 플랫폼",
+                 "검색결과","검색 결과","차량검색","매물검색","홈페이지"]
+    listing_terms=["주행거리","km","차량번호","판매중","판매가","차량가","성능점검","최초등록","연식"]
 
-    lh=sum(1 for x in listing_terms if x in text)
-    gh=sum(1 for x in guide_terms if x in text)
+    if any(g in text for g in guide_terms):
+        return "reference"
 
-    if lh>=3 and gh==0:
+    # URL 자체가 실제 차량 상세페이지면 가장 강한 근거
+    if is_specific_listing_url(url,domain):
         return "listing"
-    if gh>=1:
+
+    # 플랫폼 도메인이라는 이유만으로 개별매물 처리하지 않음.
+    # 연식·주행거리 등 실제 차량 메타정보가 같이 있어야 개별매물로 인정.
+    evidence=sum(1 for x in listing_terms if x in text)
+    if year is not None: evidence+=2
+    if km is not None: evidence+=2
+    if evidence>=5 and (year is not None or km is not None):
+        return "listing"
+
+    if evidence>=2:
         return "reference"
     return "unknown"
 
@@ -179,9 +222,9 @@ def extract_candidates(results,v):
         title=clean_text(x.get("title",""))
         desc=clean_text(x.get("description",""))
         domain=x.get("domain","")
+        url=x.get("url","")
         text=f"{title} {desc}".lower()
 
-        stype=source_type(text,domain)
         km=nearest_mileage(text,v.km)
         kw_hits=sum(1 for k in kws if k in text)
         pt_match=True if not pt else any(term in text for term in pt)
@@ -191,8 +234,9 @@ def extract_candidates(results,v):
         for m in patt.finditer(text):
             price=int(m.group(1).replace(",",""))
             start,end=m.span()
-            context=text[max(0,start-100):min(len(text),end+100)]
-            yr=nearest_year(text,start)
+            context=text[max(0,start-120):min(len(text),end+120)]
+            yr=nearest_year(text,start,v.year)
+            stype=source_type(text,domain,url,yr,km)
             reason=None
 
             if price<floor:
@@ -209,27 +253,29 @@ def extract_candidates(results,v):
                 reason=f"연식 범위 초과({yr})"
             elif km and abs(km-v.km)>40000:
                 reason=f"주행거리 범위 초과({km:,}km)"
-            elif stype=="unknown" and yr is None and km is None:
+            elif stype=="unknown":
                 reason="개별매물 근거 부족"
 
             score=min(kw_hits,4)*2
-            score += 6 if stype=="listing" else (-3 if stype=="reference" else 0)
-            score += 7 if yr==v.year else (4 if yr and abs(yr-v.year)==1 else (0 if yr is None else -4))
+            score += 7 if stype=="listing" else (-4 if stype=="reference" else -2)
+            score += 8 if yr==v.year else (5 if yr and abs(yr-v.year)==1 else (-3 if yr is None else -6))
             if pt and pt_match: score+=3
 
             if km:
                 diff=abs(km-v.km)
-                score += 6 if diff<=10000 else (4 if diff<=20000 else (2 if diff<=40000 else -5))
+                score += 7 if diff<=10000 else (5 if diff<=20000 else (2 if diff<=40000 else -6))
             else:
-                score -= 2
+                score -= 3
 
-            if yr is None:
-                score -= 2
-
-            if any(term in context for term in ["판매가","차량가","매물","판매중"]):
+            # 연식과 주행거리가 모두 확인된 실제 매물은 확실하게 우선
+            if yr is not None and km is not None:
+                score += 5
+            if is_specific_listing_url(url,domain):
+                score += 4
+            if any(term in context for term in ["판매가","차량가","판매중"]):
                 score+=2
 
-            rec={"price":price,"year":yr,"score":score,"mileage":km,"title":title,"url":x.get("url",""),
+            rec={"price":price,"year":yr,"score":score,"mileage":km,"title":title,"url":url,
                  "domain":domain,"reason":reason or "채택","source_type":stype,
                  "target_year":v.year,"target_km":v.km}
 
@@ -241,7 +287,7 @@ def extract_candidates(results,v):
         if per_url:
             best=sorted(per_url,key=lambda c:(-c["score"],99 if c["year"] is None else abs(c["year"]-v.year),
                                               999999 if c["mileage"] is None else abs(c["mileage"]-v.km)))[0]
-            min_score=11 if best["source_type"]=="listing" else 13
+            min_score=15 if best["source_type"]=="listing" else 17
             if best["score"]>=min_score:
                 accepted.append(best)
                 for extra in per_url[1:]:
@@ -333,7 +379,11 @@ def robust_market(cands):
     rc=len(filtered)-lc
     exact_meta=sum(1 for c in filtered if c.get("year") is not None and c.get("mileage") is not None)
 
-    if lc>=5 and exact_meta>=4:
+    # 8차: 연식+주행거리 동시 확인 건수가 없으면 대표시세는 반드시 잠정값 처리
+    if exact_meta==0:
+        conf="매우 낮음"
+        err=15
+    elif lc>=5 and exact_meta>=4:
         conf="높음"
         err=4
     elif lc>=3 and exact_meta>=2:
@@ -353,6 +403,7 @@ def robust_market(cands):
         "exact_meta_count":exact_meta,
         "confidence":conf,
         "error_pct":err,
+        "provisional": exact_meta < 2,
         "median":int(round(wm)),
         "low":int(low),
         "high":int(high),
