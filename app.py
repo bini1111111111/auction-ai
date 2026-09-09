@@ -322,6 +322,34 @@ def nearest_year(text,pos,target_year):
     found.sort(key=lambda x:(x[2],x[0],abs(x[1]-target_year)))
     return found[0][1]
 
+def mileage_values(text):
+    vals=[]
+    # 104,377km / 40,000 km
+    for m in re.finditer(r"(?<!\d)(\d{1,3}(?:,\d{3})+)\s*(?:km|㎞|키로)", text, re.I):
+        try:
+            vals.append(int(m.group(1).replace(",","")))
+        except (TypeError, ValueError):
+            pass
+
+    # 4만km / 10.6만 km
+    for m in re.finditer(r"(?<!\d)(\d{1,3}(?:\.\d+)?)\s*만\s*(?:km|㎞|키로)", text, re.I):
+        try:
+            vals.append(int(float(m.group(1))*10000))
+        except (TypeError, ValueError):
+            pass
+
+    # 40000km 처럼 쉼표 없는 4~6자리 표기
+    for m in re.finditer(r"(?<![\d,])(\d{4,6})\s*(?:km|㎞|키로)", text, re.I):
+        try:
+            val=int(m.group(1))
+            if 1000 <= val <= 500000:
+                vals.append(val)
+        except (TypeError, ValueError):
+            pass
+
+    # 중복 제거
+    return sorted(set(vals))
+
 def nearest_mileage(text,target):
     vals=mileage_values(text)
     return min(vals,key=lambda x:abs(x-target)) if vals else None
