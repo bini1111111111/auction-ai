@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>공매가 AI 7차</title>
+<title>공매가 AI 8차</title>
 <style>
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f6fa;margin:0;color:#172033}
 .wrap{max-width:1120px;margin:24px auto;padding:0 16px}.card{background:#fff;border-radius:16px;padding:20px;margin:14px 0;box-shadow:0 3px 14px #0001}
@@ -14,8 +14,8 @@ button{background:#111827;color:#fff;border:0;border-radius:9px;padding:12px 16p
 table{width:100%;border-collapse:collapse}th,td{font-size:12px;padding:8px;border-bottom:1px solid #eee;text-align:left;vertical-align:top}.pill{display:inline-block;padding:3px 7px;border-radius:999px;background:#eef2ff;font-size:11px}.price{font-weight:800;white-space:nowrap}
 details{margin-top:14px}summary{cursor:pointer;font-weight:750}@media(max-width:850px){.g,.r{grid-template-columns:1fr}}
 </style></head><body><div class="wrap">
-<h1>🚗 공매가 AI 7차 · 비교매물 엄격선별형</h1>
-<p class="s">연식 ±1년 · 주행거리 ±4만km · 실제 매물 우선 · 메타정보 부족자료 감점 · 신뢰도/예상오차 표시</p>
+<h1>🚗 공매가 AI 8차 · 비교매물 엄격선별형</h1>
+<p class="s">연식 ±1년 · 주행거리 ±4만km · 실제 차량 상세페이지 우선 · 2자리 연식(21년식 등) 인식 · 플랫폼/검색페이지 제외 강화</p>
 
 <div class="card"><h2>1. 차량정보</h2><div class="g">
 <div><label>차량명 / 트림</label><input id="car" placeholder="예: 쏘나타 하이브리드 프리미엄 플러스"></div>
@@ -35,7 +35,7 @@ details{margin-top:14px}summary{cursor:pointer;font-weight:750}@media(max-width:
 <div class="card"><h2>2. 자동검색 보완용 수동 가격</h2>
 <p class="s">자동검색이 부족할 때만 실제로 확인한 유사매물 판매가격을 쉼표로 입력해. 자동검색 테스트 때는 빈칸으로 둬.</p>
 <input id="manual" placeholder="예: 1680,1720,1790">
-<p class="warn s">현재 검색 공급자: <b>{{ provider }}</b>. 7차는 연식 ±1년, 주행거리 ±4만km를 벗어난 자료를 기본 제외하고, 연식·주행거리 메타정보가 부족하면 신뢰도를 낮춰.</p>
+<p class="warn s">현재 검색 공급자: <b>{{ provider }}</b>. 8차는 플랫폼 도메인 자체를 개별매물로 보지 않고, 실제 차량 상세페이지 또는 연식·주행거리 근거가 확인되는 자료를 우선 채택해.</p>
 <button onclick="analyze()">인터넷 시세 조사 + 공매가 계산</button></div>
 
 <div class="card"><h2>3. 결과</h2><div id="out" class="s">차량정보를 입력하고 분석 버튼을 눌러줘.</div></div>
@@ -64,9 +64,14 @@ async function analyze(){
   let rejected=(d.rejected||[]).slice(0,30).map(x=>'<tr><td class="price">'+fmt(x.price)+'만원</td><td>'+esc(x.reason||'')+'</td><td>'+(x.year||'-')+'</td><td>'+(x.mileage?fmt(x.mileage)+'km':'-')+'</td><td>'+esc(x.title||'')+'</td></tr>').join('');
 
   let confidenceNote='검색 신뢰도 '+m.confidence+' · 예상 오차 약 ±'+m.error_pct+'%.';
+  if(m.provisional){
+    confidenceNote+=' 연식+주행거리가 함께 확인된 비교매물이 2건 미만이라 현재 시세와 입찰가는 잠정값이야.';
+  }
   if(m.confidence==='낮음'||m.confidence==='매우 낮음'){
     confidenceNote+=' 실제 유사매물 3건 이상을 수동으로 추가하면 정확도가 크게 좋아져.';
   }
+  let marketLabel=m.provisional?'잠정 소매시세':'대표 소매시세';
+  let targetLabel=m.provisional?'잠정 추천가':'추천 입찰가';
 
   $('out').innerHTML=
   '<div class="r">'+
@@ -74,14 +79,14 @@ async function analyze(){
   '<div class="m">개별매물<b>'+m.listing_count+'건</b></div>'+
   '<div class="m">연식+주행거리 확인<b>'+m.exact_meta_count+'건</b></div>'+
   '<div class="m">신뢰도<b>'+m.confidence+'</b></div>'+
-  '<div class="m">대표 소매시세<b>'+fmt(m.median)+'만원</b></div>'+
-  '<div class="m">추천 입찰가<b>'+fmt(a.target)+'만원</b></div>'+
+  '<div class="m">'+marketLabel+'<b>'+fmt(m.median)+'만원</b></div>'+
+  '<div class="m">'+targetLabel+'<b>'+fmt(a.target)+'만원</b></div>'+
   '</div>'+
   '<h3>현실 공매가 '+fmt(a.auction_low)+'~'+fmt(a.auction_high)+'만원 · 절대 상한 '+fmt(a.upper)+'만원</h3>'+
   '<p>적용 할인율 '+a.discount_rate+'% · '+a.verdict+'</p>'+
   '<div class="warn"><b>신뢰도 경고</b><br>'+confidenceNote+'</div>'+
   '<p>채택된 보정가격: '+m.prices.map(fmt).join(', ')+'</p>'+
-  '<div class="ok"><b>7차 계산 방식</b><br>연식은 목표연식 ±1년, 주행거리는 ±4만km를 우선 조건으로 사용해. 연식·주행거리 둘 다 확인된 실제 매물 수가 적으면 신뢰도를 자동으로 낮춰.</div>'+
+  '<div class="ok"><b>8차 계산 방식</b><br>21년식·2021년형·최초등록 2021 같은 연식 표기를 추가 인식하고, 엔카·KB차차차·K Car 등의 메인/검색/시세 페이지는 개별매물에서 제외해. 연식+주행거리 확인 자료가 2건 미만이면 시세와 입찰가를 잠정값으로 표시해.</div>'+
   '<details open><summary>채택 자료와 근거</summary><table><tr><th>구분</th><th>원문 가격</th><th>보정 가격</th><th>연식</th><th>주행거리</th><th>유사도</th><th>검색결과</th></tr>'+adopted+'</table></details>'+
   '<details><summary>제외한 가격 보기</summary><table><tr><th>가격</th><th>제외 이유</th><th>연식</th><th>주행거리</th><th>검색결과</th></tr>'+rejected+'</table></details>';
 
