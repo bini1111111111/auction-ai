@@ -7,7 +7,7 @@ from html import unescape
 from urllib.parse import urlparse
 import os, re, statistics, requests
 
-app = FastAPI(title="공매가 AI 8.3.1차")
+app = FastAPI(title="공매가 AI 8.4차")
 templates = Jinja2Templates(directory="templates")
 
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
@@ -193,6 +193,74 @@ def powertrain_group(car):
     if "가솔린" in c or "휘발유" in c: return ["가솔린","휘발유"]
     return None
 
+TRIM_RANK = {
+    "스마트":1, "모던":2, "프레스티지":3, "프리미엄":3,
+    "노블레스":4, "익스클루시브":4, "럭셔리":4,
+    "시그니처":5, "인스퍼레이션":5, "스포츠":5,
+    "캘리그래피":6, "그래비티":6, "플래티넘":6,
+    "익스페디션":6, "블랙잉크":6
+}
+
+def detect_drive(text):
+    t=(text or "").lower().replace(" ","")
+    if any(x in t for x in ["4wd","awd","4륜","사륜"]):
+        return "4WD"
+    if any(x in t for x in ["2wd","2륜"]):
+        return "2WD"
+    return None
+
+def detect_engine(text):
+    t=(text or "").lower()
+    m=re.search(r"(?<!\d)([1-6]\.\d)\s*(?:t|터보|l|리터)?", t)
+    return m.group(1) if m else None
+
+def detect_trim(text):
+    t=(text or "")
+    found=[]
+    for name,rank in TRIM_RANK.items():
+        if name.lower() in t.lower():
+            found.append((rank,name))
+    if not found:
+        return None
+    return sorted(found, reverse=True)[0][1]
+
+def core_model_tokens(car):
+    raw=re.findall(r"[가-힣A-Za-z0-9]+",(car or "").lower())
+    stop={
+        "가솔린","휘발유","디젤","경유","하이브리드","hev","lpg","lpi","엘피지",
+        "전기","ev","phev","2wd","4wd","awd","2륜","4륜","오토","자동","수동",
+        "터보","프리미엄","플러스","프레스티지","노블레스","시그니처",
+        "캘리그래피","인스퍼레이션","럭셔리","모던","스마트","스포츠",
+        "그래비티","플래티넘","익스페디션","블랙잉크","기본형","패키지","라인"
+    }
+    out=[]
+    for t in raw:
+        if t in stop or re.fullmatch(r"\d+(?:\.\d+)?",t) or re.fullmatch(r"20\d{2}",t):
+            continue
+        if len(t)>=2:
+            out.append(t)
+    return out[:3]
+
+def trim_adjustment_pct(target_trim, source_trim):
+    # 트림 서열은 차종마다 다를 수 있으므로 보정폭을 작게 제한한다.
+    if not target_trim or not source_trim or target_trim==source_trim:
+        return 0.0
+    tr=TRIM_RANK.get(target_trim)
+    sr=TRIM_RANK.get(source_trim)
+    if tr is None or sr is None:
+        return 0.0
+    return max(-0.03,min(0.03,(tr-sr)*0.015))
+
+def drive_adjustment_pct(target_drive, source_drive):
+    # 목표가 4WD인데 비교매물이 2WD면 목표차 가격으로 +3%, 반대는 -3%.
+    if not target_drive or not source_drive or target_drive==source_drive:
+        return 0.0
+    if target_drive=="4WD" and source_drive=="2WD":
+        return 0.03
+    if target_drive=="2WD" and source_drive=="4WD":
+        return -0.03
+    return 0.0
+
 def _normalize_2digit_year(y2: int, target_year: int):
     # 중고차 검색에서 17년식, 21년형처럼 2자리 연식 표기가 흔함
     candidates=[1900+y2, 2000+y2]
@@ -288,8 +356,14 @@ def extract_candidates(results,v):
     accepted=[]; rejected=[]
     patt=re.compile(r"(?<![\d,])(\d{1,3}(?:,\d{3})+|\d{3,5})\s*만\s*원")
     kws=car_keywords(v.car)
+    core=core_model_tokens(v.car)
     pt=powertrain_group(v.car)
     floor=price_floor(v.year)
+
+    target_drive=detect_drive(v.car)
+    target_engine=detect_engine(v.car)
+    target_trim=detect_trim(v.car)
+
     bad=["월납","월 납","월렌트","월 렌트","월리스","월 리스","보증금","선수금","지원금","취등록","보험료",
          "수리비","부품비","사고비","계약금","할인","혜택","캐시백","리스료","렌트료"]
 
@@ -302,14 +376,21 @@ def extract_candidates(results,v):
 
         km=nearest_mileage(text,v.km)
         kw_hits=sum(1 for k in kws if k in text)
+        core_hits=sum(1 for k in core if k in text)
         pt_match=True if not pt else any(term in text for term in pt)
-        model_ok=kw_hits>=1 if kws else True
+
+        source_drive=detect_drive(text)
+        source_engine=detect_engine(text)
+        source_trim=detect_trim(text)
+
+        # 8.4차: 모델명 자체가 확인되면 세부 트림/구동방식 차이로 탈락시키지 않는다.
+        model_ok=(core_hits>=1) if core else (kw_hits>=1 if kws else True)
         per_url=[]
 
         for m in patt.finditer(text):
             price=int(m.group(1).replace(",",""))
             start,end=m.span()
-            context=text[max(0,start-120):min(len(text),end+120)]
+            context=text[max(0,start-140):min(len(text),end+140)]
             yr=nearest_year(text,start,v.year)
             stype=source_type(text,domain,url,yr,km)
             reason=None
@@ -331,10 +412,11 @@ def extract_candidates(results,v):
             elif stype=="unknown":
                 reason="개별매물 근거 부족"
 
-            score=min(kw_hits,4)*2
+            score=min(core_hits,3)*4 + min(kw_hits,4)
             score += 7 if stype=="listing" else (-4 if stype=="reference" else -2)
             score += 8 if yr==v.year else (5 if yr and abs(yr-v.year)==1 else (-3 if yr is None else -6))
-            if pt and pt_match: score+=3
+            if pt and pt_match:
+                score+=4
 
             if km:
                 diff=abs(km-v.km)
@@ -342,7 +424,6 @@ def extract_candidates(results,v):
             else:
                 score -= 3
 
-            # 연식과 주행거리가 모두 확인된 실제 매물은 확실하게 우선
             if yr is not None and km is not None:
                 score += 5
             if is_specific_listing_url(url,domain):
@@ -350,9 +431,26 @@ def extract_candidates(results,v):
             if any(term in context for term in ["판매가","차량가","판매중"]):
                 score+=2
 
-            rec={"price":price,"year":yr,"score":score,"mileage":km,"title":title,"url":url,
-                 "domain":domain,"reason":reason or "채택","source_type":stype,
-                 "target_year":v.year,"target_km":v.km}
+            # 구동/배기량/트림은 탈락 조건이 아니라 유사도와 가격보정 요소.
+            if target_drive and source_drive:
+                score += 2 if target_drive==source_drive else 0
+            if target_engine and source_engine:
+                score += 2 if target_engine==source_engine else -1
+            if target_trim and source_trim:
+                score += 2 if target_trim==source_trim else 0
+
+            drive_adj=drive_adjustment_pct(target_drive,source_drive)
+            trim_adj=trim_adjustment_pct(target_trim,source_trim)
+
+            rec={
+                "price":price,"year":yr,"score":score,"mileage":km,"title":title,"url":url,
+                "domain":domain,"reason":reason or "채택","source_type":stype,
+                "target_year":v.year,"target_km":v.km,
+                "target_drive":target_drive,"source_drive":source_drive,
+                "target_engine":target_engine,"source_engine":source_engine,
+                "target_trim":target_trim,"source_trim":source_trim,
+                "drive_adjust_pct":drive_adj,"trim_adjust_pct":trim_adj
+            }
 
             if reason is None:
                 per_url.append(rec)
@@ -360,9 +458,15 @@ def extract_candidates(results,v):
                 rejected.append(rec)
 
         if per_url:
-            best=sorted(per_url,key=lambda c:(-c["score"],99 if c["year"] is None else abs(c["year"]-v.year),
-                                              999999 if c["mileage"] is None else abs(c["mileage"]-v.km)))[0]
-            min_score=15 if best["source_type"]=="listing" else 17
+            best=sorted(
+                per_url,
+                key=lambda c:(-c["score"],
+                              99 if c["year"] is None else abs(c["year"]-v.year),
+                              999999 if c["mileage"] is None else abs(c["mileage"]-v.km))
+            )[0]
+
+            # 실제 개별매물은 기준을 약간 완화하되 참고자료는 계속 엄격하게 유지.
+            min_score=13 if best["source_type"]=="listing" else 17
             if best["score"]>=min_score:
                 accepted.append(best)
                 for extra in per_url[1:]:
@@ -415,8 +519,17 @@ def robust_market(cands):
     for c in listing:
         adj=normalize_year(c["price"],c.get("year"),c["target_year"])
         adj=adjust_km(adj,c.get("mileage"),c["target_km"])
+        drive_adj=float(c.get("drive_adjust_pct") or 0)
+        trim_adj=float(c.get("trim_adjust_pct") or 0)
+        adj=adj*(1+drive_adj)*(1+trim_adj)
         cc=dict(c)
         cc["adjusted_price"]=round(adj)
+        notes=[]
+        if drive_adj:
+            notes.append(f"구동 {drive_adj*100:+.0f}%")
+        if trim_adj:
+            notes.append(f"트림 {trim_adj*100:+.1f}%")
+        cc["adjustment_note"]=" / ".join(notes) if notes else "연식·주행거리 보정"
         enriched.append(cc)
 
     vals=[c["adjusted_price"] for c in enriched]
@@ -503,7 +616,16 @@ def robust_market(cands):
         cc=dict(c)
         adj=normalize_year(c["price"],c.get("year"),c["target_year"])
         adj=adjust_km(adj,c.get("mileage"),c["target_km"])
+        drive_adj=float(c.get("drive_adjust_pct") or 0)
+        trim_adj=float(c.get("trim_adjust_pct") or 0)
+        adj=adj*(1+drive_adj)*(1+trim_adj)
         cc["adjusted_price"]=round(adj)
+        notes=[]
+        if drive_adj:
+            notes.append(f"구동 {drive_adj*100:+.0f}%")
+        if trim_adj:
+            notes.append(f"트림 {trim_adj*100:+.1f}%")
+        cc["adjustment_note"]=" / ".join(notes) if notes else "연식·주행거리 보정"
         ref_preview.append(cc)
 
     return {
