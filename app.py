@@ -7,7 +7,7 @@ from html import unescape
 from urllib.parse import urlparse
 import os, re, statistics, requests, traceback
 
-app = FastAPI(title="공매가 AI 8.4.3차")
+app = FastAPI(title="공매가 AI 8.4.4차")
 templates = Jinja2Templates(directory="templates")
 
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
@@ -518,10 +518,10 @@ def _extract_candidates_core(results,v):
                 reason=f"연식 범위 초과({yr})"
             elif km and abs(km-v.km)>40000:
                 reason=f"주행거리 범위 초과({km:,}km)"
-            elif stype=="unknown":
+            elif stype in ("unknown","reference"):
                 if strong_reference_ok(text, v, model_ok, pt_match, source_drive, source_trim):
                     stype="strong_reference"
-                else:
+                elif stype=="unknown":
                     reason="개별매물 근거 부족"
 
             score=min(core_hits,3)*4 + min(kw_hits,4)
@@ -551,6 +551,12 @@ def _extract_candidates_core(results,v):
             # 8.4.1차: 실제 상세매물 + 핵심 모델/동력원 일치 시 강하게 가산
             if stype=="listing" and model_ok and pt_match:
                 score += 5
+            elif stype=="strong_reference" and model_ok and pt_match:
+                score += 4
+                if source_drive:
+                    score += 2
+                if source_trim:
+                    score += 2
             if any(term in context for term in ["판매가","차량가","판매중"]):
                 score+=2
 
@@ -671,14 +677,14 @@ def robust_market(cands):
     reference=[c for c in cands if c["source_type"] not in ("listing","strong_reference")]
 
     # 실제 개별매물을 최우선으로 사용.
-    # 3건 미만일 때만 강한 참고자료를 최대 2건까지 보조로 사용한다.
+    # 3건 미만일 때만 강한 참고자료를 최대 3건까지 보조로 사용한다.
     market_pool=list(listing)
     fallback_used=False
     if len(market_pool)<3 and strong_ref:
         fallback_used=True
         need=max(0,3-len(market_pool))
         strong_ref=sorted(strong_ref,key=lambda c:-c["score"])
-        market_pool += strong_ref[:min(2,need)]
+        market_pool += strong_ref[:min(3,need)]
 
     if not market_pool:
         return None
@@ -954,7 +960,7 @@ def analyze(v: Vehicle):
         if not market:
             return JSONResponse({
                 "ok":False,
-                "message":"단계적 검색까지 진행했지만 조건에 맞는 실제 비교매물을 충분히 찾지 못했어. 필터는 유지한 채 검색 범위만 넓혔고, 억지로 유사도가 낮은 차량을 넣지는 않았어. 실제 유사매물 가격을 수동으로 추가하면 계산할 수 있어.",
+                "message":"단계적 검색까지 진행했지만 계산 가능한 비교자료를 확보하지 못했어. 아래 진단정보로 어떤 단계에서 탈락했는지 확인할 수 있어.",
                 "queries":queries,
                 "search_stage":search_stage,
                 "relaxed_names":relaxed_names,
