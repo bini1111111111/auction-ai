@@ -7,7 +7,7 @@ from html import unescape
 from urllib.parse import urlparse
 import os, re, statistics, requests, traceback
 
-app = FastAPI(title="공매가 AI 8.4.2차")
+app = FastAPI(title="공매가 AI 8.4.3차")
 templates = Jinja2Templates(directory="templates")
 
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
@@ -432,6 +432,35 @@ def source_type(text, domain, url="", year=None, km=None):
         return "reference"
     return "unknown"
 
+
+def is_guide_or_price_article(text, domain):
+    t=(text or "").lower()
+    d=(domain or "").lower()
+    guide_words=["시세표","시세 총정리","중고차가이드","가격 가이드","가격표","중고차 시세"]
+    return any(w in t for w in guide_words) or any(x in d for x in ["carinfo","guide","blog"])
+
+def strong_reference_ok(text, v, model_ok, pt_match, source_drive, source_trim):
+    """
+    실제 상세매물은 아니지만 차종/동력원/구동/트림/가격이 구체적인
+    가격 가이드 자료는 '강한 참고자료'로 보관한다.
+    최종 시세 계산에는 실제 매물이 부족할 때만 보조적으로 사용한다.
+    """
+    if not model_ok or not pt_match:
+        return False
+    t=(text or "").lower()
+
+    # 너무 일반적인 시세표는 제외
+    if any(x in t for x in ["구형 하이브리드","시세 총정리","국내 매물 대수 1위"]):
+        return False
+
+    # 최소 하나 이상의 세부 사양이 확인되어야 함
+    detail = 0
+    if source_drive: detail += 1
+    if source_trim: detail += 1
+    if detect_engine(text): detail += 1
+
+    return detail >= 1 and any(x in t for x in ["중고 가격","판매가","중고차 가격","만원"])
+
 def _extract_candidates_core(results,v):
     accepted=[]; rejected=[]
     patt=re.compile(r"(?<![\d,])(\d{1,3}(?:,\d{3})+|\d{3,5})\s*만\s*원")
@@ -490,10 +519,20 @@ def _extract_candidates_core(results,v):
             elif km and abs(km-v.km)>40000:
                 reason=f"주행거리 범위 초과({km:,}km)"
             elif stype=="unknown":
-                reason="개별매물 근거 부족"
+                if strong_reference_ok(text, v, model_ok, pt_match, source_drive, source_trim):
+                    stype="strong_reference"
+                else:
+                    reason="개별매물 근거 부족"
 
             score=min(core_hits,3)*4 + min(kw_hits,4)
-            score += 7 if stype=="listing" else (-4 if stype=="reference" else -2)
+            if stype=="listing":
+                score += 7
+            elif stype=="strong_reference":
+                score += 2
+            elif stype=="reference":
+                score -= 4
+            else:
+                score -= 2
             score += 8 if yr==v.year else (5 if yr and abs(yr-v.year)==1 else (-3 if yr is None else -6))
             if pt and pt_match:
                 score+=4
@@ -552,7 +591,12 @@ def _extract_candidates_core(results,v):
             )[0]
 
             # 실제 개별매물은 기준을 약간 완화하되 참고자료는 계속 엄격하게 유지.
-            min_score=10 if best["source_type"]=="listing" else 17
+            if best["source_type"]=="listing":
+                min_score=10
+            elif best["source_type"]=="strong_reference":
+                min_score=10
+            else:
+                min_score=17
             if best["score"]>=min_score:
                 accepted.append(best)
                 for extra in per_url[1:]:
@@ -623,15 +667,24 @@ def robust_market(cands):
         return None
 
     listing=[c for c in cands if c["source_type"]=="listing"]
-    reference=[c for c in cands if c["source_type"]!="listing"]
+    strong_ref=[c for c in cands if c["source_type"]=="strong_reference"]
+    reference=[c for c in cands if c["source_type"] not in ("listing","strong_reference")]
 
-    # 8.1차 핵심: 참고자료는 대표 소매시세 계산에 절대 넣지 않는다.
-    # 실제 개별매물이 하나도 없을 때만 계산 불가 처리한다.
-    if not listing:
+    # 실제 개별매물을 최우선으로 사용.
+    # 3건 미만일 때만 강한 참고자료를 최대 2건까지 보조로 사용한다.
+    market_pool=list(listing)
+    fallback_used=False
+    if len(market_pool)<3 and strong_ref:
+        fallback_used=True
+        need=max(0,3-len(market_pool))
+        strong_ref=sorted(strong_ref,key=lambda c:-c["score"])
+        market_pool += strong_ref[:min(2,need)]
+
+    if not market_pool:
         return None
 
     enriched=[]
-    for c in listing:
+    for c in market_pool:
         adj=normalize_year(c["price"],c.get("year"),c["target_year"])
         adj=adjust_km(adj,c.get("mileage"),c["target_km"])
         drive_adj=float(c.get("drive_adjust_pct") or 0)
@@ -644,6 +697,8 @@ def robust_market(cands):
             notes.append(f"구동 {drive_adj*100:+.0f}%")
         if trim_adj:
             notes.append(f"트림 {trim_adj*100:+.1f}%")
+        if c["source_type"]=="strong_reference":
+            notes.append("강한 참고자료")
         cc["adjustment_note"]=" / ".join(notes) if notes else "연식·주행거리 보정"
         enriched.append(cc)
 
@@ -661,10 +716,9 @@ def robust_market(cands):
             filtered.append(c)
         else:
             cc=dict(c)
-            cc["reason"]="개별매물 가격 편차/통계적 이상값"
+            cc["reason"]="비교자료 가격 편차/통계적 이상값"
             out.append(cc)
 
-    # 이상값 제거 결과가 전부 사라지면 원자료를 다시 쓰되 신뢰도를 낮춘다.
     if not filtered:
         filtered=enriched
         out=[]
@@ -681,13 +735,16 @@ def robust_market(cands):
     else:
         low,high=min(prices),max(prices)
 
-    lc=len(filtered)
+    lc=sum(1 for c in filtered if c["source_type"]=="listing")
+    src_count=len(filtered)
     exact_listing_meta=sum(
         1 for c in filtered
-        if c.get("year") is not None and c.get("mileage") is not None
+        if c.get("source_type")=="listing"
+        and c.get("year") is not None
+        and c.get("mileage") is not None
     )
+    strong_ref_count=sum(1 for c in filtered if c["source_type"]=="strong_reference")
 
-    # 가격 편차: 보정가격의 최대-최소가 중앙값 대비 얼마나 벌어지는지 계산
     spread_ratio=((max(prices)-min(prices))/wm) if len(prices)>=2 and wm else 0
     if spread_ratio>=0.25:
         dispersion="큼"
@@ -696,16 +753,20 @@ def robust_market(cands):
     else:
         dispersion="작음"
 
-    # 실제 개별매물 + 연식/주행거리 확인 건수 + 가격 편차를 함께 반영
     reasons=[]
     if lc < 3:
         reasons.append("실제 개별매물 3건 미만")
     if exact_listing_meta < 3:
         reasons.append("연식+주행거리 확인 개별매물 3건 미만")
+    if strong_ref_count:
+        reasons.append(f"강한 참고자료 {strong_ref_count}건 보조 사용")
     if dispersion=="큼":
-        reasons.append("비교매물 간 가격 편차 큼")
+        reasons.append("비교자료 간 가격 편차 큼")
 
-    if lc>=5 and exact_listing_meta>=5 and dispersion=="작음":
+    # 강한 참고자료가 들어가면 신뢰도 상한을 '낮음'으로 제한.
+    if strong_ref_count:
+        conf="낮음"; err=12
+    elif lc>=5 and exact_listing_meta>=5 and dispersion=="작음":
         conf="높음"; err=4
     elif lc>=3 and exact_listing_meta>=3 and dispersion!="큼":
         conf="보통"; err=7
@@ -714,7 +775,6 @@ def robust_market(cands):
     else:
         conf="매우 낮음"; err=15
 
-    # 가격 편차가 크면 한 단계 더 보수적으로
     if dispersion=="큼":
         if conf=="높음":
             conf="보통"; err=max(err,7)
@@ -723,11 +783,11 @@ def robust_market(cands):
         elif conf=="낮음":
             conf="매우 낮음"; err=max(err,15)
 
-    provisional = (lc < 3 or exact_listing_meta < 3 or dispersion=="큼")
+    provisional = (lc < 3 or exact_listing_meta < 3 or dispersion=="큼" or strong_ref_count>0)
 
-    # 참고자료는 계산에서 제외하지만 화면 검증용으로 별도 보관
+    # 일반 참고자료는 계산에서 제외, 화면 검증용으로만 보관.
     ref_preview=[]
-    for c in reference[:10]:
+    for c in (strong_ref + reference)[:15]:
         cc=dict(c)
         adj=normalize_year(c["price"],c.get("year"),c["target_year"])
         adj=adjust_km(adj,c.get("mileage"),c["target_km"])
@@ -735,22 +795,18 @@ def robust_market(cands):
         trim_adj=float(c.get("trim_adjust_pct") or 0)
         adj=adj*(1+drive_adj)*(1+trim_adj)
         cc["adjusted_price"]=round(adj)
-        notes=[]
-        if drive_adj:
-            notes.append(f"구동 {drive_adj*100:+.0f}%")
-        if trim_adj:
-            notes.append(f"트림 {trim_adj*100:+.1f}%")
-        cc["adjustment_note"]=" / ".join(notes) if notes else "연식·주행거리 보정"
         ref_preview.append(cc)
 
     return {
         "count":len(filtered),
         "listing_count":lc,
+        "strong_reference_count":strong_ref_count,
         "reference_count":len(reference),
         "exact_meta_count":exact_listing_meta,
         "confidence":conf,
         "error_pct":err,
         "provisional":provisional,
+        "fallback_used":fallback_used,
         "dispersion":dispersion,
         "spread_pct":round(spread_ratio*100,1),
         "confidence_reasons":reasons,
@@ -760,7 +816,7 @@ def robust_market(cands):
         "prices":prices[:30],
         "adopted":sorted(
             filtered,
-            key=lambda c:(-c["score"],abs(c["adjusted_price"]-wm))
+            key=lambda c:(0 if c["source_type"]=="listing" else 1,-c["score"],abs(c["adjusted_price"]-wm))
         )[:20],
         "references":ref_preview,
         "outliers":out[:20]
