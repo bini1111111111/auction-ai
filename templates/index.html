@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>공매가 AI 8.2차</title>
+<title>공매가 AI 8.2.1차</title>
 <style>
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f6fa;margin:0;color:#172033}
 .wrap{max-width:1120px;margin:24px auto;padding:0 16px}.card{background:#fff;border-radius:16px;padding:20px;margin:14px 0;box-shadow:0 3px 14px #0001}
@@ -14,7 +14,7 @@ button{background:#111827;color:#fff;border:0;border-radius:9px;padding:12px 16p
 table{width:100%;border-collapse:collapse}th,td{font-size:12px;padding:8px;border-bottom:1px solid #eee;text-align:left;vertical-align:top}.pill{display:inline-block;padding:3px 7px;border-radius:999px;background:#eef2ff;font-size:11px}.price{font-weight:800;white-space:nowrap}
 details{margin-top:14px}summary{cursor:pointer;font-weight:750}@media(max-width:850px){.g,.r{grid-template-columns:1fr}}
 </style></head><body><div class="wrap">
-<h1>🚗 공매가 AI 8.2차 · 확장검색·시세확정형</h1>
+<h1>🚗 공매가 AI 8.2.1차 · 빠른 확장검색형</h1>
 <p class="s">연식 ±1년 · 주행거리 ±4만km · 참고자료는 시세 계산에서 제외 · 실제 개별매물 3건 이상을 기준으로 신뢰도 판단</p>
 
 <div class="card"><h2>1. 차량정보</h2><div class="g">
@@ -91,7 +91,7 @@ async function analyze(){
   '<p>적용 할인율 '+a.discount_rate+'% · '+a.verdict+'</p>'+
   '<div class="warn"><b>신뢰도 경고</b><br>'+confidenceNote+'</div>'+
   '<p>채택된 보정가격: '+m.prices.map(fmt).join(', ')+'</p>'+
-  '<div class="ok"><b>8.1차 계산 방식</b><br>1차 검색에서 검증 개별매물이 3건 미만이면 연식 ±1년·주행거리 구간·엔카·KB차차차·K Car 검색을 자동으로 확장해. 참고자료는 시세 계산에서 제외하고, 실제 개별매물 3건과 연식+주행거리 확인 3건을 확보하지 못하면 '시세 확정 불가'로 표시해.</div>'+
+  '<div class="ok"><b>8.1차 계산 방식</b><br>1차 검색에서 검증 개별매물이 3건 미만이면 최대 8개의 고효율 검색만 추가하고, 3건을 확보하면 즉시 중단해. 참고자료는 시세 계산에서 제외하고, 실제 개별매물 3건과 연식+주행거리 확인 3건을 확보하지 못하면 '시세 확정 불가'로 표시해.</div>'+
   '<details open><summary>채택 자료와 근거</summary><table><tr><th>구분</th><th>원문 가격</th><th>보정 가격</th><th>연식</th><th>주행거리</th><th>유사도</th><th>검색결과</th></tr>'+adopted+'</table></details>'+
   '<details><summary>제외한 가격 보기</summary><table><tr><th>가격</th><th>제외 이유</th><th>연식</th><th>주행거리</th><th>검색결과</th></tr>'+rejected+'</table></details>';
 
