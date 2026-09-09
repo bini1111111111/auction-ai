@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>공매가 AI 8.4.2차</title>
+<title>공매가 AI 8.4.3차</title>
 <style>
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f6fa;margin:0;color:#172033}
 .wrap{max-width:1120px;margin:24px auto;padding:0 16px}.card{background:#fff;border-radius:16px;padding:20px;margin:14px 0;box-shadow:0 3px 14px #0001}
@@ -14,7 +14,7 @@ button{background:#111827;color:#fff;border:0;border-radius:9px;padding:12px 16p
 table{width:100%;border-collapse:collapse}th,td{font-size:12px;padding:8px;border-bottom:1px solid #eee;text-align:left;vertical-align:top}.pill{display:inline-block;padding:3px 7px;border-radius:999px;background:#eef2ff;font-size:11px}.price{font-weight:800;white-space:nowrap}
 details{margin-top:14px}summary{cursor:pointer;font-weight:750}@media(max-width:850px){.g,.r{grid-template-columns:1fr}}
 </style></head><body><div class="wrap">
-<h1>🚗 공매가 AI 8.4.2차 · 서버안정화형</h1>
+<h1>🚗 공매가 AI 8.4.3차 · 비교자료등급형</h1>
 <p class="s">연식 ±1년 · 주행거리 ±4만km · 차명/트림을 단계적으로 완화해 검색 · 참고자료는 시세 계산에서 제외</p>
 
 <div class="card"><h2>1. 차량정보</h2><div class="g">
@@ -66,7 +66,7 @@ async function analyze(){
       ? '<a href="'+esc(x.url)+'" target="_blank" rel="noopener noreferrer">매물 보기</a>'
       : '-';
     return '<tr>'+
-      '<td><span class="tag">'+esc(x.source_type==='listing'?'개별매물':'참고자료')+'</span></td>'+
+      '<td><span class="tag">'+esc(x.source_type==='listing'?'개별매물':(x.source_type==='strong_reference'?'강한 참고':'참고자료'))+'</span></td>'+
       '<td><b>'+fmt(x.price)+'만원</b></td>'+
       '<td>'+fmt(x.adjusted_price)+'만원</td>'+
       '<td>'+esc(x.year||'-')+'</td>'+
@@ -85,6 +85,7 @@ async function analyze(){
   let confidenceNote='시세 상태: '+(m.market_status||'잠정 시세')+' · 검색 신뢰도 '+m.confidence+' · 예상 오차 약 ±'+m.error_pct+'% · 개별매물 가격 편차 '+m.dispersion+'('+m.spread_pct+'%).';
   if(d.search_stage){ confidenceNote+=' 검색 단계 '+d.search_stage+'까지 실행.'; }
   if(d.expanded_search){ confidenceNote+=' 검증 매물이 부족해 2차 확장검색까지 실행했어.'; }
+  if(m.strong_reference_count){ confidenceNote+=' 실제 매물이 부족해 강한 참고자료 '+m.strong_reference_count+'건을 보조로 사용했어.'; }
   if((m.confidence_reasons||[]).length){
     confidenceNote+=' 낮게 평가한 이유: '+m.confidence_reasons.join(' / ')+'.';
   }
@@ -111,7 +112,7 @@ async function analyze(){
   '<p>적용 할인율 '+a.discount_rate+'% · '+a.verdict+'</p>'+
   '<div class="warn"><b>신뢰도 경고</b><br>'+confidenceNote+'</div>'+
   '<p>채택된 보정가격: '+m.prices.map(fmt).join(', ')+'</p>'+
-  '<div class="ok"><b>8.4.2차 계산 방식</b><br>차량 연식과 게시일을 구분하고, 2WD/4WD·트림 차이는 가격 보정으로 반영해. 검색결과 한 건이 비정상이어도 전체 분석이 중단되지 않도록 서버 예외처리를 강화했고, 서버 오류도 JSON으로 화면에 표시해.</div>'+
+  '<div class="ok"><b>8.4.3차 계산 방식</b><br>실제 개별매물을 최우선으로 사용하고, 3건 미만일 때만 모델·동력원·세부사양이 구체적인 가격 가이드 자료를 최대 2건까지 강한 참고자료로 보조 사용해. 강한 참고자료가 들어가면 결과는 반드시 잠정값으로 표시하고 신뢰도는 낮음 이하로 제한해.</div>'+
   '<details open><summary>채택 자료와 근거</summary><table><tr><th>구분</th><th>원문 가격</th><th>보정 가격</th><th>연식</th><th>주행거리</th><th>구동</th><th>트림</th><th>보정내역</th><th>유사도</th><th>출처</th><th>검색결과</th><th>링크</th></tr>'+adopted+'</table></details>'+
   '<details><summary>제외한 가격 보기</summary><table><tr><th>가격</th><th>제외 이유</th><th>연식</th><th>주행거리</th><th>검색결과</th></tr>'+rejected+'</table></details>';
 
