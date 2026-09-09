@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>공매가 AI 8차</title>
+<title>공매가 AI 8.1차</title>
 <style>
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f6fa;margin:0;color:#172033}
 .wrap{max-width:1120px;margin:24px auto;padding:0 16px}.card{background:#fff;border-radius:16px;padding:20px;margin:14px 0;box-shadow:0 3px 14px #0001}
@@ -14,8 +14,8 @@ button{background:#111827;color:#fff;border:0;border-radius:9px;padding:12px 16p
 table{width:100%;border-collapse:collapse}th,td{font-size:12px;padding:8px;border-bottom:1px solid #eee;text-align:left;vertical-align:top}.pill{display:inline-block;padding:3px 7px;border-radius:999px;background:#eef2ff;font-size:11px}.price{font-weight:800;white-space:nowrap}
 details{margin-top:14px}summary{cursor:pointer;font-weight:750}@media(max-width:850px){.g,.r{grid-template-columns:1fr}}
 </style></head><body><div class="wrap">
-<h1>🚗 공매가 AI 8차 · 비교매물 엄격선별형</h1>
-<p class="s">연식 ±1년 · 주행거리 ±4만km · 실제 차량 상세페이지 우선 · 2자리 연식(21년식 등) 인식 · 플랫폼/검색페이지 제외 강화</p>
+<h1>🚗 공매가 AI 8.1차 · 실제매물 3건 검증형</h1>
+<p class="s">연식 ±1년 · 주행거리 ±4만km · 참고자료는 시세 계산에서 제외 · 실제 개별매물 3건 이상을 기준으로 신뢰도 판단</p>
 
 <div class="card"><h2>1. 차량정보</h2><div class="g">
 <div><label>차량명 / 트림</label><input id="car" placeholder="예: 쏘나타 하이브리드 프리미엄 플러스"></div>
@@ -63,9 +63,12 @@ async function analyze(){
   let adopted=(m.adopted||[]).map(x=>'<tr><td><span class="pill">'+(x.source_type==='listing'?'개별매물':'참고자료')+'</span></td><td class="price">'+fmt(x.price)+'만원</td><td>'+fmt(x.adjusted_price)+'만원</td><td>'+(x.year||'-')+'</td><td>'+(x.mileage?fmt(x.mileage)+'km':'-')+'</td><td>점수 '+x.score+'</td><td>'+esc(x.title||'')+'</td></tr>').join('');
   let rejected=(d.rejected||[]).slice(0,30).map(x=>'<tr><td class="price">'+fmt(x.price)+'만원</td><td>'+esc(x.reason||'')+'</td><td>'+(x.year||'-')+'</td><td>'+(x.mileage?fmt(x.mileage)+'km':'-')+'</td><td>'+esc(x.title||'')+'</td></tr>').join('');
 
-  let confidenceNote='검색 신뢰도 '+m.confidence+' · 예상 오차 약 ±'+m.error_pct+'%.';
+  let confidenceNote='검색 신뢰도 '+m.confidence+' · 예상 오차 약 ±'+m.error_pct+'% · 개별매물 가격 편차 '+m.dispersion+'('+m.spread_pct+'%).';
+  if((m.confidence_reasons||[]).length){
+    confidenceNote+=' 낮게 평가한 이유: '+m.confidence_reasons.join(' / ')+'.';
+  }
   if(m.provisional){
-    confidenceNote+=' 연식+주행거리가 함께 확인된 비교매물이 2건 미만이라 현재 시세와 입찰가는 잠정값이야.';
+    confidenceNote+=' 실제 개별매물 3건 이상, 그리고 그중 연식+주행거리 확인 매물 3건 이상이 확보되지 않았거나 가격 편차가 커서 현재 시세와 입찰가는 잠정값이야.';
   }
   if(m.confidence==='낮음'||m.confidence==='매우 낮음'){
     confidenceNote+=' 실제 유사매물 3건 이상을 수동으로 추가하면 정확도가 크게 좋아져.';
@@ -77,7 +80,7 @@ async function analyze(){
   '<div class="r">'+
   '<div class="m">채택 자료<b>'+m.count+'건</b></div>'+
   '<div class="m">개별매물<b>'+m.listing_count+'건</b></div>'+
-  '<div class="m">연식+주행거리 확인<b>'+m.exact_meta_count+'건</b></div>'+
+  '<div class="m">검증 개별매물<b>'+m.exact_meta_count+'건</b></div>'+
   '<div class="m">신뢰도<b>'+m.confidence+'</b></div>'+
   '<div class="m">'+marketLabel+'<b>'+fmt(m.median)+'만원</b></div>'+
   '<div class="m">'+targetLabel+'<b>'+fmt(a.target)+'만원</b></div>'+
@@ -86,7 +89,7 @@ async function analyze(){
   '<p>적용 할인율 '+a.discount_rate+'% · '+a.verdict+'</p>'+
   '<div class="warn"><b>신뢰도 경고</b><br>'+confidenceNote+'</div>'+
   '<p>채택된 보정가격: '+m.prices.map(fmt).join(', ')+'</p>'+
-  '<div class="ok"><b>8차 계산 방식</b><br>21년식·2021년형·최초등록 2021 같은 연식 표기를 추가 인식하고, 엔카·KB차차차·K Car 등의 메인/검색/시세 페이지는 개별매물에서 제외해. 연식+주행거리 확인 자료가 2건 미만이면 시세와 입찰가를 잠정값으로 표시해.</div>'+
+  '<div class="ok"><b>8.1차 계산 방식</b><br>참고자료 가격은 대표 소매시세 계산에서 완전히 제외해. 실제 개별매물 3건 이상과 연식+주행거리 확인 개별매물 3건 이상을 확보해야 확정 시세로 표시하고, 비교매물 가격 편차가 크면 신뢰도를 자동으로 낮춰.</div>'+
   '<details open><summary>채택 자료와 근거</summary><table><tr><th>구분</th><th>원문 가격</th><th>보정 가격</th><th>연식</th><th>주행거리</th><th>유사도</th><th>검색결과</th></tr>'+adopted+'</table></details>'+
   '<details><summary>제외한 가격 보기</summary><table><tr><th>가격</th><th>제외 이유</th><th>연식</th><th>주행거리</th><th>검색결과</th></tr>'+rejected+'</table></details>';
 
