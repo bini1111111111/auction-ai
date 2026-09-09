@@ -7,7 +7,7 @@ from html import unescape
 from urllib.parse import urlparse
 import os, re, statistics, requests
 
-app = FastAPI(title="공매가 AI 8.2.1차")
+app = FastAPI(title="공매가 AI 8.3차")
 templates = Jinja2Templates(directory="templates")
 
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
@@ -93,27 +93,81 @@ def build_queries(v):
     c = v.car.strip()
     return [
         f'"{c}" {v.year} {km_man}만km 중고차 매물',
-        f'{v.year}년식 {c} {km_man}만km 판매가',
+        f'{v.year}년식 "{c}" {km_man}만km 판매가',
         f'site:encar.com {v.year} "{c}" {km_man}만km',
         f'site:kbchachacha.com {v.year} "{c}" {km_man}만km',
         f'site:kcar.com {v.year} "{c}" {km_man}만km',
     ]
 
-def build_expanded_queries(v):
-    """8.2.1차: 검증 개별매물이 부족할 때만 실행하는 빠른 확장검색."""
-    c = v.car.strip()
-    target = max(1, round(v.km / 10000))
+def relaxed_car_names(v):
+    raw = re.sub(r"\s+", " ", v.car.strip())
+    tokens = raw.split()
 
-    qs = [
-        f'{v.year} "{c}" {target}만km 중고차 매물 가격',
-        f'{v.year-1} "{c}" {target}만km 중고차 매물 가격',
-        f'{v.year+1} "{c}" {target}만km 중고차 매물 가격',
-        f'site:encar.com {v.year} "{c}" {target}만km',
-        f'site:kbchachacha.com {v.year} "{c}" {target}만km',
-        f'site:kcar.com {v.year} "{c}" {target}만km',
-        f'"{c}" "{v.year}년식" 중고차 {target}만km',
-        f'"{c}" "최초등록 {v.year}" {target}만km',
-    ]
+    trim_words = {
+        "프리미엄","플러스","프리미엄플러스","인스퍼레이션","캘리그래피",
+        "시그니처","노블레스","프레스티지","익스클루시브","스마트",
+        "모던","럭셔리","스포츠","그래비티","블랙잉크","에어",
+        "익스페디션","슈프림","엘리트","리미티드","플래티넘",
+        "RE","LE","SE","SEL","H-픽","H픽"
+    }
+
+    power_words = {
+        "하이브리드","HEV","EV","전기","디젤","LPG","엘피지",
+        "가솔린","휘발유","PHEV","플러그인하이브리드"
+    }
+
+    names = [raw]
+
+    stripped = [t for t in tokens if t not in trim_words]
+    if stripped:
+        s = " ".join(stripped)
+        if s not in names:
+            names.append(s)
+
+    power = [t for t in stripped if t in power_words]
+    base = [t for t in stripped if t not in power_words]
+
+    if base:
+        model = " ".join(base[:2])
+        if power:
+            s = (model + " " + " ".join(power)).strip()
+            if s not in names:
+                names.append(s)
+        if model not in names:
+            names.append(model)
+
+    if tokens and tokens[0] not in names:
+        names.append(tokens[0])
+
+    return names[:4]
+
+def build_relaxed_queries(v, car_name, stage=2):
+    target = max(1, round(v.km / 10000))
+    years = (v.year-1, v.year, v.year+1)
+
+    qs = []
+    if stage == 2:
+        for y in years:
+            qs += [
+                f'{y} "{car_name}" {target}만km 중고차 판매',
+                f'{y} "{car_name}" 중고차 매물 가격',
+            ]
+        qs += [
+            f'site:encar.com "{car_name}" {v.year} 중고차',
+            f'site:kbchachacha.com "{car_name}" {v.year} 중고차',
+            f'site:kcar.com "{car_name}" {v.year} 중고차',
+        ]
+    else:
+        for y in years:
+            qs += [
+                f'{car_name} {y} 중고차 {target}만km 판매가',
+                f'{car_name} {y} 중고차 실매물',
+                f'{car_name} {y} 중고차 가격 {target}만km',
+            ]
+        qs += [
+            f'"{car_name}" 중고차 판매 매물',
+            f'"{car_name}" 중고차 실매물 가격',
+        ]
 
     seen, out = set(), []
     for q in qs:
@@ -540,18 +594,29 @@ def home(request: Request):
 def analyze(v: Vehicle):
     web=[]
     errors=[]
-    queries=build_queries(v)
-    expanded_used=False
+    queries=[]
+    search_stage=1
 
-    # 1차 검색: 기본 5개 쿼리
-    for q in queries:
-        try:
-            web.extend(search_web(q))
-        except Exception as e:
-            errors.append(str(e))
+    def run_queries(qs, max_calls):
+        nonlocal web, queries
+        existing=set(queries)
+        count=0
+        for q in qs:
+            if q in existing:
+                continue
+            if count >= max_calls:
+                break
+            try:
+                web.extend(search_web(q))
+            except Exception as e:
+                errors.append(str(e))
+            queries.append(q)
+            count += 1
 
-    web=dedupe_results(web)
-    accepted,rejected=extract_candidates(web,v)
+    def recalc():
+        nonlocal web
+        web=dedupe_results(web)
+        return extract_candidates(web,v)
 
     def verified_listing_count(items):
         return sum(
@@ -561,25 +626,24 @@ def analyze(v: Vehicle):
             and c.get("mileage") is not None
         )
 
-    # 검증 개별매물 3건 미만일 때만 빠른 확장검색.
-    # 최대 8개까지만 돌리고, 3건 확보 즉시 중단한다.
-    if verified_listing_count(accepted) < 3:
-        expanded_used=True
-        extra_queries=build_expanded_queries(v)
-        existing=set(queries)
+    run_queries(build_queries(v), 5)
+    accepted,rejected=recalc()
 
-        for q in [x for x in extra_queries if x not in existing][:8]:
-            try:
-                web.extend(search_web(q))
-            except Exception as e:
-                errors.append(str(e))
+    relaxed_names=relaxed_car_names(v)
 
-            web=dedupe_results(web)
-            accepted,rejected=extract_candidates(web,v)
-            queries.append(q)
-
+    if verified_listing_count(accepted) < 3 and len(relaxed_names) >= 2:
+        search_stage=2
+        for name in relaxed_names[1:3]:
+            run_queries(build_relaxed_queries(v,name,stage=2), 4)
+            accepted,rejected=recalc()
             if verified_listing_count(accepted) >= 3:
                 break
+
+    if verified_listing_count(accepted) < 3:
+        search_stage=3
+        fallback_name = relaxed_names[1] if len(relaxed_names) >= 2 else relaxed_names[0]
+        run_queries(build_relaxed_queries(v,fallback_name,stage=3), 6)
+        accepted,rejected=recalc()
 
     if v.manual_prices:
         for x in v.manual_prices:
@@ -596,11 +660,12 @@ def analyze(v: Vehicle):
     if not market:
         return JSONResponse({
             "ok":False,
-            "message":"조건에 맞는 실제 비교매물을 충분히 찾지 못했어. 검색은 종료했어. 차량명/트림을 더 정확히 입력하거나 실제 유사매물 가격을 수동으로 추가해줘.",
+            "message":"단계적 검색까지 진행했지만 조건에 맞는 실제 비교매물을 충분히 찾지 못했어. 필터는 유지한 채 검색 범위만 넓혔고, 억지로 유사도가 낮은 차량을 넣지는 않았어. 실제 유사매물 가격을 수동으로 추가하면 계산할 수 있어.",
             "queries":queries,
-            "expanded_search":expanded_used,
-            "search_results":web[:40],
-            "rejected":rejected[:50],
+            "search_stage":search_stage,
+            "relaxed_names":relaxed_names,
+            "search_results":web[:50],
+            "rejected":rejected[:60],
             "search_errors":errors
         })
 
@@ -619,11 +684,12 @@ def analyze(v: Vehicle):
     return {
         "ok":True,
         "queries":queries,
-        "expanded_search":expanded_used,
+        "search_stage":search_stage,
+        "relaxed_names":relaxed_names,
         "market":market,
         "auction":auction,
-        "search_results":web[:40],
-        "rejected":rejected[:50],
+        "search_results":web[:50],
+        "rejected":rejected[:60],
         "search_errors":errors
     }
 
