@@ -64,7 +64,7 @@ async function analyze(){
   let rejected=(d.rejected||[]).slice(0,30).map(x=>'<tr><td class="price">'+fmt(x.price)+'만원</td><td>'+esc(x.reason||'')+'</td><td>'+(x.year||'-')+'</td><td>'+(x.mileage?fmt(x.mileage)+'km':'-')+'</td><td>'+esc(x.title||'')+'</td></tr>').join('');
 
   let confidenceNote='시세 상태: '+(m.market_status||'잠정 시세')+' · 검색 신뢰도 '+m.confidence+' · 예상 오차 약 ±'+m.error_pct+'% · 개별매물 가격 편차 '+m.dispersion+'('+m.spread_pct+'%).';
-  if(data.expanded_search){ confidenceNote+=' 검증 매물이 부족해 2차 확장검색까지 실행했어.'; }
+  if(d.expanded_search){ confidenceNote+=' 검증 매물이 부족해 2차 확장검색까지 실행했어.'; }
   if((m.confidence_reasons||[]).length){
     confidenceNote+=' 낮게 평가한 이유: '+m.confidence_reasons.join(' / ')+'.';
   }
