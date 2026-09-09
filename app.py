@@ -7,7 +7,7 @@ from html import unescape
 from urllib.parse import urlparse
 import os, re, statistics, requests
 
-app = FastAPI(title="공매가 AI 8.4차")
+app = FastAPI(title="공매가 AI 8.4.1차")
 templates = Jinja2Templates(directory="templates")
 
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
@@ -266,38 +266,61 @@ def _normalize_2digit_year(y2: int, target_year: int):
     candidates=[1900+y2, 2000+y2]
     return min(candidates, key=lambda y: abs(y-target_year))
 
-def nearest_year(text, pos, target_year):
-    matches=[]
+def nearest_year(text,pos,target_year):
+    """
+    차량 연식만 최대한 추출한다.
+    게시일/시세기준일은 차량 연식으로 사용하지 않는다.
+    """
+    s=(text or "").lower()
 
-    # 2021년식 / 2021년형 / 2021년 / 최초등록 2021
-    patterns=[
-        r"(?<!\d)(20\d{2})\s*(?:년식|년형|년|MY)?",
-        r"(?:최초등록|등록연월|등록일|연식)\s*[:：]?\s*(20\d{2})",
-        r"(?<!\d)(\d{2})\s*(?:년식|년형)",
-        r"(?:최초등록|등록연월|연식)\s*[:：]?\s*(\d{2})\s*년",
+    strong_patterns = [
+        r"(20\d{2})\s*년\s*식",
+        r"(20\d{2})\s*년\s*형",
+        r"(20\d{2})\s*모델",
+        r"최초\s*등록\s*[:：]?\s*(20\d{2})",
+        r"등록\s*연도\s*[:：]?\s*(20\d{2})",
+        r"연식\s*[:：]?\s*(20\d{2})",
+        r"차량\s*연식\s*[:：]?\s*(20\d{2})",
+        r"(?<!\d)(\d{2})\s*년\s*식",
+        r"(?<!\d)(\d{2})\s*년\s*형",
     ]
 
-    for pi,pat in enumerate(patterns):
-        for m in re.finditer(pat,text,re.I):
-            raw=int(m.group(1))
-            y=raw if raw>=1900 else _normalize_2digit_year(raw,target_year)
-            d=min(abs(m.start()-pos),abs(m.end()-pos))
-            # 가격과 다소 떨어져 있어도 같은 검색 snippet 안의 연식이면 인정
-            if d<=180:
-                bonus=0 if pi<2 else 8
-                matches.append((d+bonus,abs(y-target_year),y))
+    found=[]
+    for pat in strong_patterns:
+        for m in re.finditer(pat,s):
+            raw=m.group(1)
+            y=int(raw)
+            if y<100:
+                y=2000+y
+            if 2000<=y<=2035:
+                found.append((abs(m.start()-pos),y,0))
 
-    return min(matches)[2] if matches else None
+    for m in re.finditer(r"(?<!\d)(20\d{2})(?!\d)", s):
+        y=int(m.group(1))
+        around=s[max(0,m.start()-18):min(len(s),m.end()+22)]
 
-def mileage_values(text):
-    vals=[]
-    for m in re.finditer(r"(?<!\d)(\d{1,3}(?:,\d{3})+)\s*(?:km|㎞|키로)", text, re.I):
-        try: vals.append(int(m.group(1).replace(",","")))
-        except: pass
-    for m in re.finditer(r"(?<!\d)(\d{1,2}(?:\.\d+)?)\s*만\s*(?:km|㎞|키로)", text, re.I):
-        try: vals.append(int(float(m.group(1))*10000))
-        except: pass
-    return vals
+        dateish = (
+            re.search(rf"{y}\s*년\s*\d{{1,2}}\s*월", around) is not None
+            or "기준" in around
+            or "작성" in around
+            or "게시" in around
+            or "업데이트" in around
+            or "시세표" in around
+            or "기사" in around
+        )
+        vehicleish = any(k in around for k in [
+            "연식","년식","년형","최초등록","등록연도","차량정보","매물정보","모델연도"
+        ])
+        if dateish and not vehicleish:
+            continue
+
+        found.append((abs(m.start()-pos),y,1))
+
+    if not found:
+        return None
+
+    found.sort(key=lambda x:(x[2],x[0],abs(x[1]-target_year)))
+    return found[0][1]
 
 def nearest_mileage(text,target):
     vals=mileage_values(text)
@@ -427,7 +450,11 @@ def extract_candidates(results,v):
             if yr is not None and km is not None:
                 score += 5
             if is_specific_listing_url(url,domain):
-                score += 4
+                score += 6
+
+            # 8.4.1차: 실제 상세매물 + 핵심 모델/동력원 일치 시 강하게 가산
+            if stype=="listing" and model_ok and pt_match:
+                score += 5
             if any(term in context for term in ["판매가","차량가","판매중"]):
                 score+=2
 
@@ -449,7 +476,9 @@ def extract_candidates(results,v):
                 "target_drive":target_drive,"source_drive":source_drive,
                 "target_engine":target_engine,"source_engine":source_engine,
                 "target_trim":target_trim,"source_trim":source_trim,
-                "drive_adjust_pct":drive_adj,"trim_adjust_pct":trim_adj
+                "drive_adjust_pct":drive_adj,"trim_adjust_pct":trim_adj,
+                "core_model_match":model_ok,
+                "powertrain_match":pt_match
             }
 
             if reason is None:
@@ -466,7 +495,7 @@ def extract_candidates(results,v):
             )[0]
 
             # 실제 개별매물은 기준을 약간 완화하되 참고자료는 계속 엄격하게 유지.
-            min_score=13 if best["source_type"]=="listing" else 17
+            min_score=10 if best["source_type"]=="listing" else 17
             if best["score"]>=min_score:
                 accepted.append(best)
                 for extra in per_url[1:]:
