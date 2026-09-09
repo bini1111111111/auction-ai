@@ -331,11 +331,13 @@ def robust_market(cands):
     listing=[c for c in cands if c["source_type"]=="listing"]
     reference=[c for c in cands if c["source_type"]!="listing"]
 
-    # 개별매물이 3건 이상이면 참고자료는 대표시세 계산에서 제외
-    working=listing if len(listing)>=3 else listing+reference
+    # 8.1차 핵심: 참고자료는 대표 소매시세 계산에 절대 넣지 않는다.
+    # 실제 개별매물이 하나도 없을 때만 계산 불가 처리한다.
+    if not listing:
+        return None
 
     enriched=[]
-    for c in working:
+    for c in listing:
         adj=normalize_year(c["price"],c.get("year"),c["target_year"])
         adj=adjust_km(adj,c.get("mileage"),c["target_km"])
         cc=dict(c)
@@ -356,15 +358,16 @@ def robust_market(cands):
             filtered.append(c)
         else:
             cc=dict(c)
-            cc["reason"]="통계적 이상값"
+            cc["reason"]="개별매물 가격 편차/통계적 이상값"
             out.append(cc)
 
+    # 이상값 제거 결과가 전부 사라지면 원자료를 다시 쓰되 신뢰도를 낮춘다.
     if not filtered:
         filtered=enriched
         out=[]
 
     wm=weighted_median([
-        (c["adjusted_price"],max(1,c["score"])*(2 if c["source_type"]=="listing" else 1))
+        (c["adjusted_price"],max(1,c["score"]))
         for c in filtered
     ])
     prices=sorted(c["adjusted_price"] for c in filtered)
@@ -375,43 +378,79 @@ def robust_market(cands):
     else:
         low,high=min(prices),max(prices)
 
-    lc=sum(1 for c in filtered if c["source_type"]=="listing")
-    rc=len(filtered)-lc
-    exact_meta=sum(1 for c in filtered if c.get("year") is not None and c.get("mileage") is not None)
+    lc=len(filtered)
+    exact_listing_meta=sum(
+        1 for c in filtered
+        if c.get("year") is not None and c.get("mileage") is not None
+    )
 
-    # 8차: 연식+주행거리 동시 확인 건수가 없으면 대표시세는 반드시 잠정값 처리
-    if exact_meta==0:
-        conf="매우 낮음"
-        err=15
-    elif lc>=5 and exact_meta>=4:
-        conf="높음"
-        err=4
-    elif lc>=3 and exact_meta>=2:
-        conf="보통"
-        err=7
-    elif lc>=2:
-        conf="낮음"
-        err=10
+    # 가격 편차: 보정가격의 최대-최소가 중앙값 대비 얼마나 벌어지는지 계산
+    spread_ratio=((max(prices)-min(prices))/wm) if len(prices)>=2 and wm else 0
+    if spread_ratio>=0.25:
+        dispersion="큼"
+    elif spread_ratio>=0.15:
+        dispersion="보통"
     else:
-        conf="매우 낮음"
-        err=15
+        dispersion="작음"
+
+    # 실제 개별매물 + 연식/주행거리 확인 건수 + 가격 편차를 함께 반영
+    reasons=[]
+    if lc < 3:
+        reasons.append("실제 개별매물 3건 미만")
+    if exact_listing_meta < 3:
+        reasons.append("연식+주행거리 확인 개별매물 3건 미만")
+    if dispersion=="큼":
+        reasons.append("비교매물 간 가격 편차 큼")
+
+    if lc>=5 and exact_listing_meta>=5 and dispersion=="작음":
+        conf="높음"; err=4
+    elif lc>=3 and exact_listing_meta>=3 and dispersion!="큼":
+        conf="보통"; err=7
+    elif lc>=2 and exact_listing_meta>=2:
+        conf="낮음"; err=10
+    else:
+        conf="매우 낮음"; err=15
+
+    # 가격 편차가 크면 한 단계 더 보수적으로
+    if dispersion=="큼":
+        if conf=="높음":
+            conf="보통"; err=max(err,7)
+        elif conf=="보통":
+            conf="낮음"; err=max(err,10)
+        elif conf=="낮음":
+            conf="매우 낮음"; err=max(err,15)
+
+    provisional = (lc < 3 or exact_listing_meta < 3 or dispersion=="큼")
+
+    # 참고자료는 계산에서 제외하지만 화면 검증용으로 별도 보관
+    ref_preview=[]
+    for c in reference[:10]:
+        cc=dict(c)
+        adj=normalize_year(c["price"],c.get("year"),c["target_year"])
+        adj=adjust_km(adj,c.get("mileage"),c["target_km"])
+        cc["adjusted_price"]=round(adj)
+        ref_preview.append(cc)
 
     return {
         "count":len(filtered),
         "listing_count":lc,
-        "reference_count":rc,
-        "exact_meta_count":exact_meta,
+        "reference_count":len(reference),
+        "exact_meta_count":exact_listing_meta,
         "confidence":conf,
         "error_pct":err,
-        "provisional": exact_meta < 2,
+        "provisional":provisional,
+        "dispersion":dispersion,
+        "spread_pct":round(spread_ratio*100,1),
+        "confidence_reasons":reasons,
         "median":int(round(wm)),
         "low":int(low),
         "high":int(high),
         "prices":prices[:30],
         "adopted":sorted(
             filtered,
-            key=lambda c:(0 if c["source_type"]=="listing" else 1,-c["score"],abs(c["adjusted_price"]-wm))
+            key=lambda c:(-c["score"],abs(c["adjusted_price"]-wm))
         )[:20],
+        "references":ref_preview,
         "outliers":out[:20]
     }
 
