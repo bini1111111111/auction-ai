@@ -5,14 +5,26 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from html import unescape
 from urllib.parse import urlparse
-import os, re, statistics, requests
+import os, re, statistics, requests, traceback
 
-app = FastAPI(title="공매가 AI 8.4.1차")
+app = FastAPI(title="공매가 AI 8.4.2차")
 templates = Jinja2Templates(directory="templates")
 
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={
+            "ok": False,
+            "message": f"서버 처리 오류: {type(exc).__name__}: {str(exc)}",
+            "error_type": type(exc).__name__,
+        },
+    )
 
 class Vehicle(BaseModel):
     car: str
@@ -29,14 +41,23 @@ class Vehicle(BaseModel):
     special: int = 0
     manual_prices: Optional[List[float]] = None
 
-def clean_text(s: str) -> str:
-    s = unescape(s or "")
+def clean_text(s) -> str:
+    if s is None:
+        return ""
+    if not isinstance(s, str):
+        try:
+            s = str(s)
+        except Exception:
+            return ""
+    s = unescape(s)
     s = re.sub(r"<[^>]+>", " ", s)
     s = re.sub(r"\s+", " ", s)
     return s.strip()
 
-def domain_of(url: str) -> str:
+def domain_of(url) -> str:
     try:
+        if not isinstance(url, str):
+            url = "" if url is None else str(url)
         return urlparse(url).netloc.lower().replace("www.", "")
     except Exception:
         return ""
@@ -76,13 +97,21 @@ def search_web(query: str) -> List[Dict[str, str]]:
 
 def dedupe_results(results):
     seen, out = set(), []
-    for x in results:
-        url = (x.get("url") or "").split("#")[0].rstrip("/")
-        key = url or x.get("title", "")
+    for x in (results or []):
+        if not isinstance(x, dict):
+            continue
+        raw_url = x.get("url") or ""
+        if not isinstance(raw_url, str):
+            raw_url = str(raw_url)
+        url = raw_url.split("#")[0].rstrip("/")
+        title = clean_text(x.get("title", ""))
+        key = url or title
         if not key or key in seen:
             continue
         seen.add(key)
         y = dict(x)
+        y["title"] = title
+        y["description"] = clean_text(x.get("description", ""))
         y["url"] = url
         y["domain"] = domain_of(url)
         out.append(y)
@@ -403,7 +432,7 @@ def source_type(text, domain, url="", year=None, km=None):
         return "reference"
     return "unknown"
 
-def extract_candidates(results,v):
+def _extract_candidates_core(results,v):
     accepted=[]; rejected=[]
     patt=re.compile(r"(?<![\d,])(\d{1,3}(?:,\d{3})+|\d{3,5})\s*만\s*원")
     kws=car_keywords(v.car)
@@ -535,6 +564,35 @@ def extract_candidates(results,v):
                 best["reason"]="유사도 점수 부족"
                 rejected.append(best)
 
+    return accepted,rejected
+
+def extract_candidates(results,v):
+    accepted=[]
+    rejected=[]
+    for item in (results or []):
+        try:
+            a,r=_extract_candidates_core([item],v)
+            accepted.extend(a)
+            rejected.extend(r)
+        except Exception as e:
+            title=""
+            url=""
+            if isinstance(item,dict):
+                title=clean_text(item.get("title",""))
+                url=clean_text(item.get("url",""))
+            rejected.append({
+                "price":0,
+                "year":None,
+                "score":0,
+                "mileage":None,
+                "title":title or "검색결과 처리 오류",
+                "url":url,
+                "domain":domain_of(url),
+                "reason":f"검색결과 처리 오류({type(e).__name__})",
+                "source_type":"unknown",
+                "target_year":v.year,
+                "target_km":v.km
+            })
     return accepted,rejected
 
 def normalize_year(price,source_year,target_year):
@@ -771,104 +829,111 @@ def home(request: Request):
 
 @app.post("/api/analyze")
 def analyze(v: Vehicle):
-    web=[]
-    errors=[]
-    queries=[]
-    search_stage=1
+    try:
+        web=[]
+        errors=[]
+        queries=[]
+        search_stage=1
 
-    def run_queries(qs, max_calls):
-        nonlocal web, queries
-        existing=set(queries)
-        count=0
-        for q in qs:
-            if q in existing:
-                continue
-            if count >= max_calls:
-                break
-            try:
-                web.extend(search_web(q))
-            except Exception as e:
-                errors.append(str(e))
-            queries.append(q)
-            count += 1
+        def run_queries(qs, max_calls):
+            nonlocal web, queries
+            existing=set(queries)
+            count=0
+            for q in qs:
+                if q in existing:
+                    continue
+                if count >= max_calls:
+                    break
+                try:
+                    web.extend(search_web(q))
+                except Exception as e:
+                    errors.append(str(e))
+                queries.append(q)
+                count += 1
 
-    def recalc():
-        nonlocal web
-        web=dedupe_results(web)
-        return extract_candidates(web,v)
+        def recalc():
+            nonlocal web
+            web=dedupe_results(web)
+            return extract_candidates(web,v)
 
-    def verified_listing_count(items):
-        return sum(
-            1 for c in items
-            if c.get("source_type")=="listing"
-            and c.get("year") is not None
-            and c.get("mileage") is not None
-        )
+        def verified_listing_count(items):
+            return sum(
+                1 for c in items
+                if c.get("source_type")=="listing"
+                and c.get("year") is not None
+                and c.get("mileage") is not None
+            )
 
-    run_queries(build_queries(v), 5)
-    accepted,rejected=recalc()
-
-    relaxed_names=relaxed_car_names(v)
-
-    if verified_listing_count(accepted) < 3 and len(relaxed_names) >= 2:
-        search_stage=2
-        for name in relaxed_names[1:3]:
-            run_queries(build_relaxed_queries(v,name,stage=2), 4)
-            accepted,rejected=recalc()
-            if verified_listing_count(accepted) >= 3:
-                break
-
-    if verified_listing_count(accepted) < 3:
-        search_stage=3
-        fallback_name = relaxed_names[1] if len(relaxed_names) >= 2 else relaxed_names[0]
-        run_queries(build_relaxed_queries(v,fallback_name,stage=3), 6)
+        run_queries(build_queries(v), 5)
         accepted,rejected=recalc()
 
-    if v.manual_prices:
-        for x in v.manual_prices:
-            if x and x>0:
-                accepted.append({
-                    "price":float(x),"year":v.year,"score":30,"mileage":v.km,
-                    "title":"수동 입력 유사매물","url":"","domain":"",
-                    "reason":"사용자 확인 매물","source_type":"listing",
-                    "target_year":v.year,"target_km":v.km
-                })
+        relaxed_names=relaxed_car_names(v)
 
-    market=robust_market(accepted)
+        if verified_listing_count(accepted) < 3 and len(relaxed_names) >= 2:
+            search_stage=2
+            for name in relaxed_names[1:3]:
+                run_queries(build_relaxed_queries(v,name,stage=2), 4)
+                accepted,rejected=recalc()
+                if verified_listing_count(accepted) >= 3:
+                    break
 
-    if not market:
-        return JSONResponse({
-            "ok":False,
-            "message":"단계적 검색까지 진행했지만 조건에 맞는 실제 비교매물을 충분히 찾지 못했어. 필터는 유지한 채 검색 범위만 넓혔고, 억지로 유사도가 낮은 차량을 넣지는 않았어. 실제 유사매물 가격을 수동으로 추가하면 계산할 수 있어.",
+        if verified_listing_count(accepted) < 3:
+            search_stage=3
+            fallback_name = relaxed_names[1] if len(relaxed_names) >= 2 else relaxed_names[0]
+            run_queries(build_relaxed_queries(v,fallback_name,stage=3), 6)
+            accepted,rejected=recalc()
+
+        if v.manual_prices:
+            for x in v.manual_prices:
+                if x and x>0:
+                    accepted.append({
+                        "price":float(x),"year":v.year,"score":30,"mileage":v.km,
+                        "title":"수동 입력 유사매물","url":"","domain":"",
+                        "reason":"사용자 확인 매물","source_type":"listing",
+                        "target_year":v.year,"target_km":v.km
+                    })
+
+        market=robust_market(accepted)
+
+        if not market:
+            return JSONResponse({
+                "ok":False,
+                "message":"단계적 검색까지 진행했지만 조건에 맞는 실제 비교매물을 충분히 찾지 못했어. 필터는 유지한 채 검색 범위만 넓혔고, 억지로 유사도가 낮은 차량을 넣지는 않았어. 실제 유사매물 가격을 수동으로 추가하면 계산할 수 있어.",
+                "queries":queries,
+                "search_stage":search_stage,
+                "relaxed_names":relaxed_names,
+                "search_results":web[:50],
+                "rejected":rejected[:60],
+                "search_errors":errors
+            })
+
+        insufficient = (
+            market["listing_count"] < 3
+            or market["exact_meta_count"] < 3
+        )
+        market["market_status"] = "시세 확정 불가" if insufficient else (
+            "잠정 시세" if market["provisional"] else "시세 확정"
+        )
+
+        auction=calc_auction(v,market["median"])
+        if insufficient:
+            auction["verdict"] = "비교매물 부족 · 공매가 확정 불가"
+
+        return {
+            "ok":True,
             "queries":queries,
             "search_stage":search_stage,
             "relaxed_names":relaxed_names,
+            "market":market,
+            "auction":auction,
             "search_results":web[:50],
             "rejected":rejected[:60],
             "search_errors":errors
+        }
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={
+            "ok": False,
+            "message": f"분석 중 오류: {type(e).__name__}: {str(e)}",
+            "error_type": type(e).__name__,
         })
-
-    insufficient = (
-        market["listing_count"] < 3
-        or market["exact_meta_count"] < 3
-    )
-    market["market_status"] = "시세 확정 불가" if insufficient else (
-        "잠정 시세" if market["provisional"] else "시세 확정"
-    )
-
-    auction=calc_auction(v,market["median"])
-    if insufficient:
-        auction["verdict"] = "비교매물 부족 · 공매가 확정 불가"
-
-    return {
-        "ok":True,
-        "queries":queries,
-        "search_stage":search_stage,
-        "relaxed_names":relaxed_names,
-        "market":market,
-        "auction":auction,
-        "search_results":web[:50],
-        "rejected":rejected[:60],
-        "search_errors":errors
-    }
-
