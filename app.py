@@ -138,6 +138,30 @@ def facelift_match(target_car,result_text):
     # 검색 제목이 축약되어 상품명이 빠진 경우는 다른 조건으로 계속 검증.
     return True,""
 
+
+def drive_group(text):
+    t=clean_text(text).upper().replace(" ", "")
+    if re.search(r"(4WD|AWD|4륜|사륜|XDRIVE|4MATIC|QUATTRO)", t):
+        return "4WD"
+    if re.search(r"(2WD|2륜|전륜|후륜|FWD|RWD)", t):
+        return "2WD"
+    return ""
+
+def trim_group(text):
+    t=clean_text(text)
+    # 검색 정확도에 영향이 큰 대표 트림명을 우선 추출.
+    trims=[
+        "시그니처 그래비티","그래비티","캘리그래피","인스퍼레이션",
+        "시그니처","노블레스","프레스티지","프리미엄 초이스",
+        "프리미엄","모던 플러스","모던","익스클루시브",
+        "럭셔리","스포츠","에어","어스"
+    ]
+    compact=t.replace(" ","").lower()
+    for trim in trims:
+        if trim.replace(" ","").lower() in compact:
+            return trim
+    return ""
+
 def build_queries(v, stage=1):
     car=(v.car or "").strip()
     core=" ".join(core_model_tokens(car))
