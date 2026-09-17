@@ -1,139 +1,62 @@
-<!doctype html>
-<html lang="ko">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>공매가 AI 9.0.1</title>
-<style>
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f6fa;margin:0;color:#172033}
-.wrap{max-width:1120px;margin:24px auto;padding:0 16px}.card{background:#fff;border-radius:16px;padding:20px;margin:14px 0;box-shadow:0 3px 14px #0001}
-.g{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}label{font-size:13px;font-weight:700;display:block;margin-bottom:5px}
-input,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #d7dce5;border-radius:9px}
-button{background:#111827;color:#fff;border:0;border-radius:9px;padding:12px 16px;font-weight:750;cursor:pointer}.s{font-size:12px;color:#667085;line-height:1.55}
-.r{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}.m{padding:14px;background:#f8fafc;border-radius:11px}.m b{display:block;font-size:18px;margin-top:6px}
-.warn{background:#fff7df;padding:12px;border-radius:10px}.ok{background:#edfdf3;padding:12px;border-radius:10px}
-table{width:100%;border-collapse:collapse}th,td{font-size:12px;padding:8px;border-bottom:1px solid #eee;text-align:left;vertical-align:top}.pill{display:inline-block;padding:3px 7px;border-radius:999px;background:#eef2ff;font-size:11px}.price{font-weight:800;white-space:nowrap}
-details{margin-top:14px}summary{cursor:pointer;font-weight:750}@media(max-width:850px){.g,.r{grid-template-columns:1fr}}
-</style></head><body><div class="wrap">
-<h1>🚗 공매가 AI 9.0.1 · 실매물우선·산정안전형</h1>
-<p class="s">연식 ±1년 · 주행거리 ±4만km · 차명/트림을 단계적으로 완화해 검색 · 참고자료는 시세 계산에서 제외</p>
-
-<div class="card"><h2>1. 차량정보</h2><div class="g">
-<div><label>차량명 / 트림</label><input id="car" placeholder="예: 쏘나타 하이브리드 프리미엄 플러스"></div>
-<div><label>연식</label><input id="year" type="number" value="2022"></div>
-<div><label>주행거리 km</label><input id="km" type="number" value="50000"></div>
-<div><label>사고 건수</label><input id="acc" type="number" value="0"></div>
-<div><label>사고 총액 (만원)</label><input id="aa" type="number" value="0"></div>
-<div><label>부품비 (만원)</label><input id="parts" type="number" value="0"></div>
-<div><label>자차 미가입</label><select id="un"><option value="0">없음</option><option value="1">1년 미만</option><option value="2">1~3년</option><option value="3">3년 이상</option></select></div>
-<div><label>용도 이력</label><select id="use"><option value="0">일반</option><option value="1">렌터카</option><option value="1.5">영업/상용</option></select></div>
-<div><label>골격손상</label><select id="frame"><option value="0">없음</option><option value="1">의심</option><option value="3">있음</option></select></div>
-<div><label>차량상태</label><select id="cond"><option value="0">양호</option><option value="1">보통</option><option value="2">상품화 필요</option></select></div>
-<div><label>시장성</label><select id="liq"><option value="0">높음</option><option value="1">보통</option><option value="2">낮음</option></select></div>
-<div><label>특수/특장차</label><select id="special"><option value="0">아님</option><option value="1">맞음</option></select></div>
-</div></div>
-
-<div class="card"><h2>2. 자동검색 보완용 수동 가격</h2>
-<p class="s">자동검색이 부족할 때만 실제로 확인한 유사매물 판매가격을 쉼표로 입력해. 자동검색 테스트 때는 빈칸으로 둬.</p>
-<input id="manual" placeholder="예: 1680,1720,1790">
-<p class="warn s">현재 검색 공급자: <b>{{ provider }}</b>. 8차는 플랫폼 도메인 자체를 개별매물로 보지 않고, 실제 차량 상세페이지 또는 연식·주행거리 근거가 확인되는 자료를 우선 채택해.</p>
-<button onclick="analyze()">인터넷 시세 조사 + 공매가 계산</button></div>
-
-<div class="card"><h2>3. 결과</h2><div id="out" class="s">차량정보를 입력하고 분석 버튼을 눌러줘.</div></div>
-</div>
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>공매가 AI 9.1</title><style>
+body{font-family:Arial,sans-serif;max-width:1050px;margin:28px auto;padding:0 18px;background:#f6f7f9;color:#20242a}
+.card{background:white;border:1px solid #ddd;border-radius:14px;padding:20px;margin:14px 0}h1{margin-bottom:4px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}label{font-size:13px}input,select{width:100%;box-sizing:border-box;padding:10px;margin-top:5px;border:1px solid #bbb;border-radius:8px}
+button{padding:12px 20px;border:0;border-radius:9px;background:#222;color:white;font-weight:bold;cursor:pointer}.muted{color:#666;font-size:13px}
+.metrics{display:flex;gap:12px;flex-wrap:wrap}.metric{padding:10px 13px;background:#f1f3f5;border-radius:9px}table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:9px;border-bottom:1px solid #ddd;text-align:left}a{color:#2457c5}pre{white-space:pre-wrap}
+@media(max-width:700px){.grid{grid-template-columns:1fr}}
+</style></head><body>
+<h1>공매가 AI 9.1</h1><div class="muted">데이터수집 진단형 · 검색결과가 어디에서 탈락하는지 단계별로 확인</div>
+<div class="card"><div class="grid">
+<label>차량명<input id="car" value="쏘렌토 하이브리드 1.6 2WD 그래비티"></label>
+<label>연식<input id="year" type="number" value="2023"></label>
+<label>주행거리 km<input id="km" type="number" value="55000"></label>
+<label>사고 횟수<input id="accident_count" type="number" value="0"></label>
+<label>사고금액 만원<input id="accident_amount" type="number" value="0"></label>
+<label>부품비 만원<input id="parts_amount" type="number" value="0"></label>
+<label>자차 미가입<select id="uninsured"><option>없음</option><option>있음</option></select></label>
+<label>용도<select id="usage"><option>일반</option><option>렌터카</option><option>영업용</option></select></label>
+<label>골격손상<select id="frame_damage"><option>없음</option><option>있음</option></select></label>
+<label>상태<select id="condition"><option>양호</option><option>보통</option><option>불량</option></select></label>
+<label>환금성<select id="marketability"><option>보통</option><option>높음</option><option>낮음</option></select></label>
+<label>특장<select id="special_body"><option>아님</option><option>특장</option></select></label>
+<label>수동 비교가격(선택)<input id="manual_prices" placeholder="예: 3390, 3500, 3550"></label>
+</div><p><button onclick="go()">분석하기</button></p></div>
+<div id="out"></div>
 <script>
-const $=x=>document.getElementById(x),N=x=>Number($(x).value)||0;
-async function analyze(){
- $('out').innerHTML='분석 중...';
- let mp=$('manual').value.split(',').map(x=>Number(x.trim())).filter(x=>x>0);
- let body={car:$('car').value,year:N('year'),km:N('km'),accident_count:N('acc'),accident_amount:N('aa'),parts_amount:N('parts'),
- uninsured:N('un'),use_history:N('use'),frame:N('frame'),condition:N('cond'),liquidity:N('liq'),special:N('special'),manual_prices:mp};
-
+const $=id=>document.getElementById(id), f=n=>Number(n||0).toLocaleString('ko-KR');
+function val(id){return $(id).value}
+async function go(){
+ $('out').innerHTML='<div class="card">검색하고 있어…</div>';
+ const body={car:val('car'),year:+val('year'),km:+val('km'),accident_count:+val('accident_count'),
+ accident_amount:+val('accident_amount'),parts_amount:+val('parts_amount'),uninsured:val('uninsured'),
+ usage:val('usage'),frame_damage:val('frame_damage'),condition:val('condition'),
+ marketability:val('marketability'),special_body:val('special_body'),manual_prices:val('manual_prices')};
  try{
-  let r=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  let raw=await r.text(), d;
-  try{ d=JSON.parse(raw); }
-  catch(e){ throw new Error('서버 응답 오류: '+raw.slice(0,180)); }
-
-  if(!d.ok){
-   let rej=(d.rejected||[]).slice(0,20).map(x=>'<tr><td class="price">'+fmt(x.price)+'만원</td><td>'+esc(x.reason||'')+'</td><td>'+esc(x.title||'')+'</td></tr>').join('');
-   $('out').innerHTML='<div class="warn">'+esc(d.message||'검색 실패')+'</div>'+
-   (rej?'<details><summary>제외된 가격 확인</summary><table><tr><th>가격</th><th>제외 이유</th><th>검색결과</th></tr>'+rej+'</table></details>':'');
-   return
-  }
-
-  if(d.status==='hold'){
-   let m=d.market||{}, ref=d.reference_market;
-   let refText=ref ? ('참고가격 '+fmt(ref.low)+'~'+fmt(ref.high)+'만원 · 중앙값 '+fmt(ref.median)+'만원') : '확인 가능한 최신 참고가격 없음';
-   let rej=(d.rejected||[]).slice(0,20).map(x=>'<tr><td class="price">'+fmt(x.price)+'만원</td><td>'+esc(x.reason||'')+'</td><td>'+esc(x.title||'')+'</td></tr>').join('');
-   $('out').innerHTML=
-    '<div class="warn"><b>공매가 산정 보류</b><br>'+esc(d.message||'')+
-    '<div class="small" style="margin-top:8px">실제 개별매물 0건 · 강한 참고 '+(m.strong_reference_count||0)+'건 · 일반 참고 '+(m.reference_count||0)+'건</div></div>'+
-    '<div class="ok" style="margin-top:12px"><b>'+esc(refText)+'</b><br><span class="small">참고용 가격이며 추천 입찰가와 절대 상한은 계산하지 않아.</span></div>'+
-    (rej?'<details><summary>제외된 가격 확인</summary><table><tr><th>가격</th><th>제외 이유</th><th>검색결과</th></tr>'+rej+'</table></details>':'');
-   return;
-  }
-
-  let m=d.market,a=d.auction;
-  let adopted=(m.adopted||[]).map(x=>{
-    const source=(x.domain||'-').replace(/^www\./,'');
-    const link=x.url
-      ? '<a href="'+esc(x.url)+'" target="_blank" rel="noopener noreferrer">매물 보기</a>'
-      : '-';
-    return '<tr>'+
-      '<td><span class="tag">'+esc(x.source_type==='listing'?'개별매물':(x.source_type==='strong_reference'?'강한 참고':'참고자료'))+'</span></td>'+
-      '<td><b>'+fmt(x.price)+'만원</b></td>'+
-      '<td>'+fmt(x.adjusted_price)+'만원</td>'+
-      '<td>'+esc(x.year||'-')+'</td>'+
-      '<td>'+(x.mileage?fmt(x.mileage)+'km':'-')+'</td>'+
-      '<td>'+esc(x.source_drive||'-')+'</td>'+
-      '<td>'+esc(x.source_trim||'-')+'</td>'+
-      '<td>'+esc(x.adjustment_note||'연식·주행거리 보정')+'</td>'+
-      '<td>점수 '+x.score+'</td>'+
-      '<td>'+esc(source)+'</td>'+
-      '<td>'+esc(x.title||'')+'</td>'+
-      '<td>'+link+'</td>'+
-      '</tr>';
-  }).join('');
-  let rejected=(d.rejected||[]).slice(0,30).map(x=>'<tr><td class="price">'+fmt(x.price)+'만원</td><td>'+esc(x.reason||'')+'</td><td>'+(x.year||'-')+'</td><td>'+(x.mileage?fmt(x.mileage)+'km':'-')+'</td><td>'+esc(x.title||'')+'</td></tr>').join('');
-
-  let confidenceNote='시세 상태: '+(m.market_status||'잠정 시세')+' · 검색 신뢰도 '+m.confidence+' · 예상 오차 약 ±'+m.error_pct+'% · 개별매물 가격 편차 '+m.dispersion+'('+m.spread_pct+'%).';
-  if(d.search_stage){ confidenceNote+=' 검색 단계 '+d.search_stage+'까지 실행.'; }
-  if(d.expanded_search){ confidenceNote+=' 검증 매물이 부족해 2차 확장검색까지 실행했어.'; }
-  if(m.strong_reference_count){ confidenceNote+=' 실제 매물이 부족해 강한 참고자료 '+m.strong_reference_count+'건을 보조로 사용했어.'; }
-  if((m.confidence_reasons||[]).length){
-    confidenceNote+=' 낮게 평가한 이유: '+m.confidence_reasons.join(' / ')+'.';
-  }
-  if(m.provisional){
-    confidenceNote+=' 실제 개별매물 3건 이상, 그리고 그중 연식+주행거리 확인 매물 3건 이상이 확보되지 않았거나 가격 편차가 커서 현재 시세와 입찰가는 잠정값이야.';
-  }
-  if(m.confidence==='낮음'||m.confidence==='매우 낮음'){
-    confidenceNote+=' 실제 유사매물 3건 이상을 수동으로 추가하면 정확도가 크게 좋아져.';
-  }
-  let insufficient=(m.market_status==='시세 확정 불가');
-  let marketLabel=insufficient?'잠정 소매시세':(m.provisional?'잠정 소매시세':'대표 소매시세');
-  let targetLabel=insufficient?'잠정 추천가':(m.provisional?'잠정 추천가':'추천 입찰가');
-
-  $('out').innerHTML=
-  '<div class="r">'+
-  '<div class="m">채택 자료<b>'+m.count+'건</b></div>'+
-  '<div class="m">개별매물<b>'+m.listing_count+'건</b></div>'+
-  '<div class="m">검증 개별매물<b>'+m.exact_meta_count+'건</b></div>'+
-  '<div class="m">신뢰도<b>'+m.confidence+'</b></div>'+
-  '<div class="m">'+marketLabel+'<b>'+fmt(m.median)+'만원</b></div>'+
-  '<div class="m">'+targetLabel+'<b>'+fmt(a.target)+'만원</b></div>'+
-  '</div>'+
-  '<h3>현실 공매가 '+fmt(a.auction_low)+'~'+fmt(a.auction_high)+'만원 · 절대 상한 '+fmt(a.upper)+'만원</h3>'+
-  '<p>적용 할인율 '+a.discount_rate+'% · '+a.verdict+'</p>'+
-  '<div class="warn"><b>신뢰도 경고</b><br>'+confidenceNote+'</div>'+
-  '<p>채택된 보정가격: '+m.prices.map(fmt).join(', ')+'</p>'+
-  '<div class="ok"><b>9.0.1 계산 방식</b><br>9.0.1은 9.0의 유사도 가중 구조를 유지하면서 검색 스니펫의 정보 누락 때문에 실제 차량 후보가 과도하게 탈락하는 필터만 완화했어. 명백한 다른 동력원·다른 세대·목록/시세자료는 그대로 제외하고, 최소 유사도 기준은 48점으로 조정했어. 또 reference/unknown으로 분류된 검색자료라도 가격과 연식·주행거리·트림 중 개별차량 단서가 충분하면 한 번 더 저신뢰 비교후보로 평가해. 강한 참고자료 계산 제외와 비교매물 2건 이하·가격편차 15% 이상 산정 보류 정책은 유지해.</div>'+
-  '<details open><summary>채택 자료와 근거</summary><table><tr><th>구분</th><th>원문 가격</th><th>보정 가격</th><th>연식</th><th>주행거리</th><th>구동</th><th>트림</th><th>보정내역</th><th>유사도</th><th>출처</th><th>검색결과</th><th>링크</th></tr>'+adopted+'</table></details>'+
-  '<details><summary>제외한 가격 보기</summary><table><tr><th>가격</th><th>제외 이유</th><th>연식</th><th>주행거리</th><th>검색결과</th></tr>'+rejected+'</table></details>';
-
- }catch(e){
-  $('out').innerHTML='<div class="warn">서버 연결 오류: '+esc(String(e))+'</div>'
- }
+  const r=await fetch('/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const text=await r.text(); let d; try{d=JSON.parse(text)}catch(e){throw new Error(text)}
+  render(d);
+ }catch(e){$('out').innerHTML='<div class="card"><b>오류</b><pre>'+e.message+'</pre></div>'}
 }
-function fmt(n){return Number(n||0).toLocaleString()}
-function esc(s){return String(s||'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]))}
+function render(d){
+ if(d.status==='error'){ $('out').innerHTML='<div class="card"><b>서버 오류</b><pre>'+d.message+'</pre></div>'; return}
+ const p=d.pipeline||{};
+ let x='<div class="card"><h2>데이터 수집 진단</h2><div class="metrics">'+
+ ['검색결과 '+f(p.search_results)+'건','가격 추출 '+f(p.price_extracted)+'건','차량정보 인식 '+f(p.vehicle_info_detected)+'건','비교후보 '+f(p.candidate_count)+'건','최종 채택 '+f(p.adopted)+'건','제외 '+f(p.rejected)+'건'].map(v=>'<div class="metric">'+v+'</div>').join('')+'</div></div>';
+ x+='<div class="card"><h2>결과</h2>';
+ if(d.status==='ok') x+='<h3>현실 공매가 '+f(d.auction_low)+'~'+f(d.auction_high)+'만원</h3><p>대표 소매시세 <b>'+f(d.retail)+'만원</b> · 목표 '+f(d.target)+'만원 · 절대 상한 '+f(d.upper)+'만원 · 할인 '+d.discount+'% · 신뢰도 '+d.confidence+'</p>';
+ else x+='<h3>공매가 산정 보류</h3><p>'+d.message+'</p>';
+ if(d.market_low) x+='<p>비교가격 '+f(d.market_low)+'~'+f(d.market_high)+'만원 · 편차 '+d.spread+'%</p>';
+ x+='</div>';
+ const rows=d.adopted||[];
+ if(rows.length){x+='<div class="card"><h2>채택 비교자료</h2><table><tr><th>가격</th><th>보정가</th><th>연식</th><th>km</th><th>유사도</th><th>출처</th></tr>'+
+ rows.map(a=>'<tr><td>'+f(a.price)+'</td><td>'+f(a.adjusted_price)+'</td><td>'+(a.year||'-')+'</td><td>'+f(a.mileage||0)+'</td><td>'+a.score+'</td><td>'+(a.url?'<a target="_blank" href="'+a.url+'">'+(a.source||'보기')+'</a>':a.source)+'</td></tr>').join('')+'</table></div>'}
+ const rej=d.rejected||[];
+ if(rej.length){x+='<div class="card"><details><summary>제외자료 '+rej.length+'건 보기</summary><table><tr><th>가격</th><th>사유</th><th>제목</th></tr>'+
+ rej.map(a=>'<tr><td>'+f(a.price)+'</td><td>'+a.reason+'</td><td>'+a.title+'</td></tr>').join('')+'</table></details></div>'}
+ if((d.errors||[]).length)x+='<div class="card"><b>검색 오류</b><pre>'+d.errors.join('\n')+'</pre></div>';
+ $('out').innerHTML=x;
+}
 </script></body></html>
