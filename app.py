@@ -7,7 +7,7 @@ from html import unescape
 from urllib.parse import urlparse
 import os, re, statistics, requests, traceback
 
-app = FastAPI(title="공매가 AI 8.6차")
+app = FastAPI(title="공매가 AI 8.6.2차")
 templates = Jinja2Templates(directory="templates")
 
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
@@ -583,6 +583,41 @@ def likely_listing_collection(title, snippet, url):
     text=clean_text(f"{title} {snippet}")
     return bool(re.search(r"(중고차\s*\d+\s*대|전체매물|검색결과|매물목록|시세표|가격표)",text))
 
+
+def listing_candidate_quality(title, snippet, url, year=None, mileage=None, price=None,
+                              target_trim="", target_drive=""):
+    """검색결과가 '차량 1대'를 특정할 수 있는지 평가. 목록/시세표는 승격 불가."""
+    text=clean_text(f"{title} {snippet}")
+    if likely_listing_collection(title, snippet, url):
+        return 0, ["목록/시세페이지"]
+
+    score=0
+    why=[]
+    if price:
+        score+=2; why.append("가격")
+    if year:
+        score+=1; why.append("연식")
+    if mileage is not None:
+        score+=2; why.append("주행거리")
+    if target_trim and trim_group(text)==target_trim:
+        score+=1; why.append("트림")
+    if target_drive and drive_group(text)==target_drive:
+        score+=1; why.append("구동")
+    if re.search(r"(인증중고차|차량번호|최초등록|판매중|A/T|오토)",text,re.I):
+        score+=1; why.append("개별차량표현")
+    if re.search(r"(detail|vehicle|product|view|car/|cars/|usedcar/)",(url or "").lower()):
+        score+=1; why.append("상세URL")
+    return score, why
+
+def can_promote_listing_candidate(title, snippet, url, year, mileage, price,
+                                  target_trim="", target_drive=""):
+    q, why=listing_candidate_quality(
+        title,snippet,url,year,mileage,price,target_trim,target_drive
+    )
+    # 가격은 필수. 그리고 차량을 특정할 수 있도록 주행거리 + 추가 정보가 필요.
+    ok=bool(price and mileage is not None and q>=5)
+    return ok,q,why
+
 def _extract_candidates_core(results,v):
     accepted=[]; rejected=[]
     patt=re.compile(r"(?<![\d,])(\d{1,3}(?:,\d{3})+|\d{3,5})\s*만\s*원")
@@ -647,8 +682,19 @@ def _extract_candidates_core(results,v):
                 stype="reference"
                 reason="목록/검색결과 페이지 · 개별매물 아님"
             elif stype=="listing" and listing_detail_quality(title, snippet, url)<2:
-                stype="reference"
-                reason="개별매물 상세정보 부족"
+                stype="listing_candidate"
+                reason="실매물 후보 · 2차 검증 필요"
+
+            # 8.6.2: 상세 URL이 불명확해도 가격+주행거리+연식/트림 등으로
+            # 차량 1대를 특정할 수 있으면 '검증 후보'로 승격.
+            if stype in ("unknown","reference","listing_candidate") and not likely_listing_collection(title, snippet, url):
+                promote,q,why=can_promote_listing_candidate(
+                    title,snippet,url,yr,km,price,
+                    trim_group(v.car),drive_group(v.car)
+                )
+                if promote:
+                    stype="listing_candidate"
+                    reason="실매물 후보 · 개별차량 정보 확인(" + ",".join(why) + ")"
 
             if stype in ("unknown","reference"):
                 if stype=="reference" and stale_reference(text):
@@ -661,6 +707,10 @@ def _extract_candidates_core(results,v):
             score=min(core_hits,3)*4 + min(kw_hits,4)
             if stype=="listing":
                 score += max(0, listing_detail_quality(title, snippet, url))*3
+            elif stype=="listing_candidate":
+                # 실제 상세매물보다 낮은 신뢰도로 계산에 참여.
+                score += max(0, listing_detail_quality(title, snippet, url))*2
+                score -= 6
                 score += 7
             elif stype=="strong_reference":
                 score += 2
@@ -810,6 +860,7 @@ def robust_market(cands):
         return None
 
     raw_listing=sorted([c for c in cands if c.get("source_type")=="listing"],key=lambda c:-c.get("score",0))
+    raw_candidate=sorted([c for c in cands if c.get("source_type")=="listing_candidate"],key=lambda c:-c.get("score",0))
     raw_strong=sorted([c for c in cands if c.get("source_type")=="strong_reference"],key=lambda c:-c.get("score",0))
     reference=[c for c in cands if c.get("source_type") not in ("listing","strong_reference")]
 
@@ -831,12 +882,21 @@ def robust_market(cands):
 
     # 검색에서 확보한 실제매물은 계산 후보로 보존한다.
     listing=[enrich(c) for c in raw_listing]
+    listing_candidate=[enrich(c) for c in raw_candidate]
     strong_ref=[enrich(c,True) for c in raw_strong]
 
-    # 실제매물 0건일 때만 산정 보류.
-    if not listing:
+    # 상세매물이 부족할 때만 검증 후보를 보조 계산자료로 사용한다.
+    # 후보는 최대 3건, 실제 상세매물보다 낮은 신뢰도로 취급.
+    candidate_used=[]
+    if len(listing)<3 and listing_candidate:
+        need=3-len(listing)
+        candidate_used=listing_candidate[:need]
+    calc_listing=listing+candidate_used
+
+    # 상세매물/검증 후보 모두 0건일 때만 산정 보류.
+    if not calc_listing:
         return {
-            "status":"hold","count":0,"listing_count":0,
+            "status":"hold","count":0,"listing_count":0,"candidate_count":len(listing_candidate),"candidate_used_count":0,
             "strong_reference_count":len(strong_ref),"reference_count":len(reference),
             "exact_meta_count":0,"confidence":"산정 보류","error_pct":None,
             "provisional":True,"fallback_used":False,"dispersion":"-","spread_pct":None,
@@ -847,6 +907,7 @@ def robust_market(cands):
         }
 
     # 대표 시세는 실제 개별매물만 사용. 강한 참고자료는 절대 섞지 않는다.
+    listing=calc_listing
     vals=[c["adjusted_price"] for c in listing]
     med=statistics.median(vals)
 
@@ -887,6 +948,10 @@ def robust_market(cands):
     else:
         reasons.append("연식·주행거리 확인 매물 부족")
 
+    if candidate_used:
+        reasons.append(f"실매물 후보 {len(candidate_used)}건 보조 사용 · 신뢰도 제한")
+        if conf=="보통":
+            conf="낮음"; err=max(err,12); status="provisional"
     if strong_ref:
         reasons.append(f"강한 참고자료 {len(strong_ref)}건은 참고용·계산 제외")
 
@@ -897,7 +962,10 @@ def robust_market(cands):
         low,high=min(prices),max(prices)
 
     return {
-        "status":status,"count":len(filtered),"listing_count":len(filtered),
+        "status":status,"count":len(filtered),
+            "listing_count":len([c for c in filtered if c.get("source_type")=="listing"]),
+            "candidate_count":len(listing_candidate),
+            "candidate_used_count":len([c for c in filtered if c.get("source_type")=="listing_candidate"]),
         "strong_reference_count":len(strong_ref),"reference_count":len(reference),
         "exact_meta_count":exact,"confidence":conf,"error_pct":err,
         "provisional":status!="confirmed","fallback_used":False,
@@ -1043,7 +1111,7 @@ def analyze(v: Vehicle):
         uniq=[]
         seen=set()
         for c in accepted:
-            if c.get("source_type")=="listing":
+            if c.get("source_type") in ("listing","listing_candidate"):
                 key=((c.get("url") or "").split("?")[0].rstrip("/").lower(),
                      clean_text(c.get("title") or "").lower(),
                      c.get("price"))
@@ -1060,7 +1128,7 @@ def analyze(v: Vehicle):
 
         # 8.5.5: 표본이 2건 이하인데 가격 편차가 15% 이상이면
         # 대표 소매시세·추천 입찰가·절대 상한을 강제로 산출하지 않는다.
-        if market and market.get("status")=="wide_provisional" and market.get("listing_count",0)<=2:
+        if market and market.get("status")=="wide_provisional" and market.get("count",0)<=2:
             return {
                 "ok":True,
                 "status":"spread_hold",
