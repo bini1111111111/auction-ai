@@ -7,7 +7,7 @@ from html import unescape
 from urllib.parse import urlparse
 import os, re, statistics, requests, traceback
 
-app = FastAPI(title="공매가 AI 8.5차")
+app = FastAPI(title="공매가 AI 8.5.2차")
 templates = Jinja2Templates(directory="templates")
 
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
@@ -117,12 +117,35 @@ def dedupe_results(results):
         out.append(y)
     return out
 
+
+# 8.5.2: 동일 모델명이라도 페이스리프트/상품성 변경 모델은 별도 비교군으로 취급.
+def facelift_family(text):
+    t=clean_text(text).lower()
+    if re.search(r"(디\s*올\s*뉴|the\s*all\s*new)",t): return "the_all_new"
+    if re.search(r"(더\s*뉴|the\s*new)",t): return "the_new"
+    if re.search(r"(올\s*뉴|all\s*new)",t): return "all_new"
+    return "base"
+
+def facelift_match(target_car,result_text):
+    tf=facelift_family(target_car)
+    rf=facelift_family(result_text)
+    # 기본형 입력에 '더 뉴/디 올 뉴/올 뉴' 검색결과가 섞이는 것을 차단.
+    if tf=="base" and rf!="base":
+        return False,"세대/페이스리프트 불일치"
+    # 입력에 상품명이 명시된 경우 다른 상품명은 차단.
+    if tf!="base" and rf!="base" and tf!=rf:
+        return False,"세대/페이스리프트 불일치"
+    # 검색 제목이 축약되어 상품명이 빠진 경우는 다른 조건으로 계속 검증.
+    return True,""
+
 def build_queries(v, stage=1):
     car=(v.car or "").strip()
     core=" ".join(core_model_tokens(car))
     pt=powertrain_group(car)
     ptword=pt[0] if pt else ""
-    base=" ".join(x for x in [str(v.year),core,ptword] if x).strip()
+    fam=facelift_family(car)
+    famword={"the_all_new":"디 올 뉴","the_new":"더 뉴","all_new":"올 뉴"}.get(fam,"")
+    base=" ".join(x for x in [str(v.year),famword,core,ptword] if x).strip()
     if stage==1:
         return [
             f'{base} {v.km}km 중고차 판매 매물',
@@ -554,6 +577,8 @@ def _extract_candidates_core(results,v):
                 reason="차종 유사도 부족"
             elif pt and not pt_match:
                 reason="동력원 불일치"
+            elif not facelift_match(v.car,text)[0]:
+                reason=facelift_match(v.car,text)[1]
             elif yr and abs(yr-v.year)>1:
                 reason=f"연식 범위 초과({yr})"
             elif km and abs(km-v.km)>40000:
@@ -622,7 +647,9 @@ def _extract_candidates_core(results,v):
                 "target_trim":target_trim,"source_trim":source_trim,
                 "drive_adjust_pct":drive_adj,"trim_adjust_pct":trim_adj,
                 "core_model_match":model_ok,
-                "powertrain_match":pt_match
+                "powertrain_match":pt_match,
+                "target_family":facelift_family(v.car),
+                "source_family":facelift_family(text)
             }
 
             if reason is None:
