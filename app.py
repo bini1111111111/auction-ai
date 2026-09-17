@@ -117,7 +117,7 @@ def dedupe_results(results):
         out.append(y)
     return out
 
-def build_queries(v,stage):
+def build_queries(v, stage=1):
     car=(v.car or "").strip()
     core=" ".join(core_model_tokens(car))
     pt=powertrain_group(car)
