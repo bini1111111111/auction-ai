@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>공매가 AI 8.6차</title>
+<title>공매가 AI 8.6.2차</title>
 <style>
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f6fa;margin:0;color:#172033}
 .wrap{max-width:1120px;margin:24px auto;padding:0 16px}.card{background:#fff;border-radius:16px;padding:20px;margin:14px 0;box-shadow:0 3px 14px #0001}
@@ -14,7 +14,7 @@ button{background:#111827;color:#fff;border:0;border-radius:9px;padding:12px 16p
 table{width:100%;border-collapse:collapse}th,td{font-size:12px;padding:8px;border-bottom:1px solid #eee;text-align:left;vertical-align:top}.pill{display:inline-block;padding:3px 7px;border-radius:999px;background:#eef2ff;font-size:11px}.price{font-weight:800;white-space:nowrap}
 details{margin-top:14px}summary{cursor:pointer;font-weight:750}@media(max-width:850px){.g,.r{grid-template-columns:1fr}}
 </style></head><body><div class="wrap">
-<h1>🚗 공매가 AI 8.6차 · 실매물우선·산정안전형</h1>
+<h1>🚗 공매가 AI 8.6.2차 · 실매물우선·산정안전형</h1>
 <p class="s">연식 ±1년 · 주행거리 ±4만km · 차명/트림을 단계적으로 완화해 검색 · 참고자료는 시세 계산에서 제외</p>
 
 <div class="card"><h2>1. 차량정보</h2><div class="g">
@@ -138,7 +138,7 @@ let m=d.market,a=d.auction;
   '<p>적용 할인율 '+a.discount_rate+'% · '+a.verdict+'</p>'+
   '<div class="warn"><b>신뢰도 경고</b><br>'+confidenceNote+'</div>'+
   '<p>채택된 보정가격: '+m.prices.map(fmt).join(', ')+'</p>'+
-  '<div class="ok"><b>8.6차 계산 방식</b><br>실제 상세매물 3건 이상 확보를 목표로 최대 4단계까지 검색해. 1단계는 연식·구동·트림·주행거리를 최대한 맞추고, 부족하면 트림 → 주행거리 순으로 조건을 완화하면서 사이트별 검색을 확대해. ‘중고차 68대’ 같은 목록페이지는 실제 개별매물에서 제외하고, 중복 상세매물도 1건으로만 계산해. 실제매물만 대표시세에 사용하며 강한 참고자료는 계산에서 제외해. 2건 이하이면서 가격편차가 15% 이상이면 공매가 산정을 보류하는 8.5.5의 안전정책도 그대로 유지해.</div>'+
+  '<div class="ok"><b>8.6.2차 계산 방식</b><br>검색자료를 ‘실제 상세매물 → 실매물 후보 → 강한 참고 → 일반 참고’로 구분해. 목록·시세페이지는 계속 제외하지만, 상세 URL이 불명확하더라도 가격·주행거리와 연식/트림 등 개별차량 정보가 충분하면 ‘실매물 후보’로 2차 검증해. 실제 상세매물이 3건 미만일 때만 후보를 최대 3건까지 보조 계산자료로 사용하고 신뢰도를 낮게 제한해. 강한 참고자료는 계속 계산에서 제외해. 2건 이하에서 가격편차가 15% 이상이면 산정을 보류하는 안전정책과 세대·페이스리프트 필터도 그대로 유지해.</div>'+
   '<details open><summary>채택 자료와 근거</summary><table><tr><th>구분</th><th>원문 가격</th><th>보정 가격</th><th>연식</th><th>주행거리</th><th>구동</th><th>트림</th><th>보정내역</th><th>유사도</th><th>출처</th><th>검색결과</th><th>링크</th></tr>'+adopted+'</table></details>'+
   '<details><summary>제외한 가격 보기</summary><table><tr><th>가격</th><th>제외 이유</th><th>연식</th><th>주행거리</th><th>검색결과</th></tr>'+rejected+'</table></details>';
 
