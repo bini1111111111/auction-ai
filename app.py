@@ -7,7 +7,7 @@ from html import unescape
 from urllib.parse import urlparse
 import os, re, statistics, requests, traceback
 
-app = FastAPI(title="공매가 AI 8.5.4차")
+app = FastAPI(title="공매가 AI 8.5.5차")
 templates = Jinja2Templates(directory="templates")
 
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
@@ -972,6 +972,24 @@ def analyze(v: Vehicle):
                     })
 
         market=robust_market(accepted)
+
+        # 8.5.5: 표본이 2건 이하인데 가격 편차가 15% 이상이면
+        # 대표 소매시세·추천 입찰가·절대 상한을 강제로 산출하지 않는다.
+        if market and market.get("status")=="wide_provisional" and market.get("listing_count",0)<=2:
+            return {
+                "ok":True,
+                "status":"spread_hold",
+                "message":"실제 개별매물은 확보했지만 가격 편차가 커서 대표 소매시세와 추천 공매가 산정을 보류했어.",
+                "market":market,
+                "listing_market":{
+                    "low":market.get("low"),
+                    "high":market.get("high"),
+                    "spread_pct":market.get("spread_pct"),
+                    "count":market.get("listing_count")
+                },
+                "rejected":rejected[:60],
+                "search_errors":errors
+            }
 
         if market and market.get("status")=="hold":
             rp=market.get("reference_prices") or []
