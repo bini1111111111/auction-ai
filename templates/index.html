@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>공매가 AI 8.6.3차</title>
+<title>공매가 AI 9.0</title>
 <style>
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f6fa;margin:0;color:#172033}
 .wrap{max-width:1120px;margin:24px auto;padding:0 16px}.card{background:#fff;border-radius:16px;padding:20px;margin:14px 0;box-shadow:0 3px 14px #0001}
@@ -14,7 +14,7 @@ button{background:#111827;color:#fff;border:0;border-radius:9px;padding:12px 16p
 table{width:100%;border-collapse:collapse}th,td{font-size:12px;padding:8px;border-bottom:1px solid #eee;text-align:left;vertical-align:top}.pill{display:inline-block;padding:3px 7px;border-radius:999px;background:#eef2ff;font-size:11px}.price{font-weight:800;white-space:nowrap}
 details{margin-top:14px}summary{cursor:pointer;font-weight:750}@media(max-width:850px){.g,.r{grid-template-columns:1fr}}
 </style></head><body><div class="wrap">
-<h1>🚗 공매가 AI 8.6.3차 · 실매물우선·산정안전형</h1>
+<h1>🚗 공매가 AI 9.0 · 실매물우선·산정안전형</h1>
 <p class="s">연식 ±1년 · 주행거리 ±4만km · 차명/트림을 단계적으로 완화해 검색 · 참고자료는 시세 계산에서 제외</p>
 
 <div class="card"><h2>1. 차량정보</h2><div class="g">
@@ -73,19 +73,7 @@ async function analyze(){
    return;
   }
 
-  
-  if(d.status==='spread_hold'){
-   let sm=d.market||{}, lm=d.listing_market||{};
-   let rows=(sm.adopted||[]).map(x=>'<tr><td>개별매물</td><td class="price">'+fmt(x.price)+'만원</td><td class="price">'+fmt(x.adjusted_price)+'만원</td><td>'+esc(x.year??'-')+'</td><td>'+esc(x.mileage?fmt(x.mileage)+'km':'-')+'</td><td>'+esc(x.title||'')+'</td></tr>').join('');
-   $('out').innerHTML=
-    '<div class="warn"><b>가격 편차 큼 · 공매가 산정 보류</b><br>'+esc(d.message||'')+
-    '<div class="small" style="margin-top:8px">실제 개별매물 '+(lm.count||0)+'건 · 보정가격 범위 '+fmt(lm.low)+'~'+fmt(lm.high)+'만원 · 가격 편차 '+esc(lm.spread_pct??'-')+'%</div></div>'+
-    '<div class="ok" style="margin-top:12px"><b>추천 입찰가와 절대 상한은 표시하지 않아.</b><br><span class="small">비교매물을 추가 확보한 뒤 다시 산정하는 것이 안전해.</span></div>'+
-    (rows?'<details open><summary>실제 개별매물 확인</summary><table><tr><th>구분</th><th>원문 가격</th><th>보정 가격</th><th>연식</th><th>주행거리</th><th>검색결과</th></tr>'+rows+'</table></details>':'');
-   return;
-  }
-
-let m=d.market,a=d.auction;
+  let m=d.market,a=d.auction;
   let adopted=(m.adopted||[]).map(x=>{
     const source=(x.domain||'-').replace(/^www\./,'');
     const link=x.url
@@ -138,7 +126,7 @@ let m=d.market,a=d.auction;
   '<p>적용 할인율 '+a.discount_rate+'% · '+a.verdict+'</p>'+
   '<div class="warn"><b>신뢰도 경고</b><br>'+confidenceNote+'</div>'+
   '<p>채택된 보정가격: '+m.prices.map(fmt).join(', ')+'</p>'+
-  '<div class="ok"><b>8.6.3차 계산 방식</b><br>검색자료를 ‘실제 상세매물 → 실매물 후보 → 강한 참고 → 일반 참고’로 구분하고, 엄격 필터에서 실제/후보가 0건이면 한 번 더 복구검증을 수행해. 복구검증은 가격·주행거리 등 개별차량 증거가 충분한 자료만 후보로 살리며, 목록·시세페이지와 모델·동력원·세대가 명백히 다른 자료는 절대 복구하지 않아. 후보는 실제 상세매물이 부족할 때만 보조 계산자료로 사용하고 신뢰도를 제한해. 강한 참고자료는 계산에서 제외하며, 2건 이하에서 가격편차가 15% 이상이면 산정을 보류하는 안전정책도 유지해.</div>'+
+  '<div class="ok"><b>9.0 계산 방식</b><br>9.0은 8.5.4의 안정적인 검색·가격추출 구조를 기반으로 다시 정리했어. 다른 동력원·다른 세대·목록/시세자료처럼 명백히 잘못된 자료만 강제 제외하고, 나머지 비교매물은 모델·동력원·연식·주행거리·구동·트림을 0~100점 유사도로 평가해 가격 계산 영향력을 조절해. 유사도 55점 미만은 계산에서 제외하고, 채택 매물은 연식·주행거리·구동·트림 가격보정 후 유사도 가중평균으로 대표 소매시세를 계산해. 강한 참고자료는 계속 계산에서 제외하며, 비교매물 2건 이하에서 가격편차가 15% 이상이면 공매가 산정을 보류해.</div>'+
   '<details open><summary>채택 자료와 근거</summary><table><tr><th>구분</th><th>원문 가격</th><th>보정 가격</th><th>연식</th><th>주행거리</th><th>구동</th><th>트림</th><th>보정내역</th><th>유사도</th><th>출처</th><th>검색결과</th><th>링크</th></tr>'+adopted+'</table></details>'+
   '<details><summary>제외한 가격 보기</summary><table><tr><th>가격</th><th>제외 이유</th><th>연식</th><th>주행거리</th><th>검색결과</th></tr>'+rejected+'</table></details>';
 
