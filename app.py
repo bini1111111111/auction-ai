@@ -1,4 +1,4 @@
-import os,re,statistics,requests
+import os,re,statistics,requests,traceback
 from urllib.parse import urlparse
 from fastapi import FastAPI,Request
 from fastapi.responses import HTMLResponse,JSONResponse
@@ -36,6 +36,23 @@ def safe_url(v):
     elif isinstance(v, (list, tuple)):
         v = v[0] if v else ""
     return clean(v)
+
+
+def normalize_search_row(x):
+    """외부 검색 응답의 중첩 dict/list를 내부 표준 문자열 형식으로 강제 변환."""
+    if not isinstance(x, dict):
+        return {"title":clean(x),"snippet":"","url":"","source":""}
+    u=safe_url(x.get("url",""))
+    return {
+        "title":clean(x.get("title","")),
+        "snippet":clean(x.get("description",x.get("snippet",""))),
+        "url":u,
+        "source":clean(domain(u))
+    }
+
+def hashable_key(*values):
+    """중복제거 key에는 외부 객체를 절대 직접 넣지 않는다."""
+    return tuple(clean(v) for v in values)
 
 def domain(u):
     try:return urlparse(u).netloc.replace("www.","")
@@ -126,9 +143,7 @@ def brave(q):
         r.raise_for_status()
         rows=[]
         for x in r.json().get("web",{}).get("results",[]):
-            u=safe_url(x.get("url",""))
-            rows.append({"title":clean(x.get("title")),"snippet":clean(x.get("description")),
-                         "url":u,"source":domain(u)})
+            rows.append(normalize_search_row(x))
         return rows,""
     except Exception as e:return [],f"{type(e).__name__}: {e}"
 
@@ -195,13 +210,13 @@ def analyze(v:Vehicle):
     for q in queries(v):
         rows,err=brave(q)
         if err:errors.append(err)
-        raw.extend(rows)
+        raw.extend(normalize_search_row(x) for x in rows)
         if len(raw)>=25:break
 
     # dedupe raw
     seen=set(); unique=[]
     for r in raw:
-        k=(safe_url(r.get("url")).split("?")[0].rstrip("/"), clean(r.get("title")))
+        k=hashable_key(safe_url(r.get("url")).split("?")[0].rstrip("/"), r.get("title"))
         if k in seen:continue
         seen.add(k);unique.append(r)
     raw=unique
@@ -233,7 +248,7 @@ def analyze(v:Vehicle):
     # dedupe calculation rows
     seen=set(); adopted=[]
     for x in sorted(extracted,key=lambda z:-z["score"]):
-        k=(safe_url(x.get("url")), int(x["price"]))
+        k=hashable_key(safe_url(x.get("url")), x.get("price"))
         if k in seen:continue
         seen.add(k);adopted.append(x)
     adopted=adopted[:8]
@@ -271,4 +286,6 @@ def analyze(v:Vehicle):
 
 @app.exception_handler(Exception)
 async def all_errors(request,exc):
-    return JSONResponse(status_code=500,content={"status":"error","message":f"{type(exc).__name__}: {exc}"})
+    tb=traceback.format_exc().strip().splitlines()
+    where=" | ".join(tb[-4:]) if tb else ""
+    return JSONResponse(status_code=500,content={"status":"error","message":f"{type(exc).__name__}: {exc}","where":where})
