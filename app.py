@@ -202,7 +202,12 @@ def risk_discount(v):
     return max(.10,min(.35,d))
 
 @app.get("/",response_class=HTMLResponse)
-def home(request:Request):return templates.TemplateResponse("index.html",{"request":request})
+def home(request: Request):
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={}
+    )
 
 @app.post("/analyze")
 def analyze(v:Vehicle):
