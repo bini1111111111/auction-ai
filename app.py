@@ -7,7 +7,7 @@ from html import unescape
 from urllib.parse import urlparse
 import os, re, statistics, requests, traceback
 
-app = FastAPI(title="공매가 AI 8.5.3차")
+app = FastAPI(title="공매가 AI 8.5.4차")
 templates = Jinja2Templates(directory="templates")
 
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
@@ -738,65 +738,110 @@ def weighted_median(values):
     return arr[-1][0]
 
 def robust_market(cands):
-    listing=sorted([c for c in cands if c.get("source_type")=="listing"],key=lambda c:-c.get("score",0))
-    strong_ref=sorted([c for c in cands if c.get("source_type")=="strong_reference"],key=lambda c:-c.get("score",0))
-    reference=[c for c in cands if c.get("source_type")=="reference"]
+    if not cands:
+        return None
 
-    # 8.5.3: 강한 참고자료는 대표 소매시세 계산에 참여시키지 않는다.
+    raw_listing=sorted([c for c in cands if c.get("source_type")=="listing"],key=lambda c:-c.get("score",0))
+    raw_strong=sorted([c for c in cands if c.get("source_type")=="strong_reference"],key=lambda c:-c.get("score",0))
+    reference=[c for c in cands if c.get("source_type") not in ("listing","strong_reference")]
+
+    def enrich(c, reference_only=False):
+        # 8.5.4: 검색자료와 계산자료를 분리하되, 보정가격 생성은 여기서 공통 처리.
+        adj=normalize_year(c["price"],c.get("year"),c.get("target_year"))
+        adj=adjust_km(adj,c.get("mileage"),c.get("target_km"))
+        drive_adj=float(c.get("drive_adjust_pct") or 0)
+        trim_adj=float(c.get("trim_adjust_pct") or 0)
+        adj=adj*(1+drive_adj)*(1+trim_adj)
+        cc=dict(c)
+        cc["adjusted_price"]=round(adj)
+        notes=[]
+        if drive_adj: notes.append(f"구동 {drive_adj*100:+.0f}%")
+        if trim_adj: notes.append(f"트림 {trim_adj*100:+.1f}%")
+        if reference_only: notes.append("참고용·계산 제외")
+        cc["adjustment_note"]=" / ".join(notes) if notes else "연식·주행거리 보정"
+        return cc
+
+    # 검색에서 확보한 실제매물은 계산 후보로 보존한다.
+    listing=[enrich(c) for c in raw_listing]
+    strong_ref=[enrich(c,True) for c in raw_strong]
+
+    # 실제매물 0건일 때만 산정 보류.
     if not listing:
-        return {"status":"hold","count":0,"listing_count":0,
-                "strong_reference_count":len(strong_ref),"reference_count":len(reference),
-                "exact_meta_count":0,"confidence":"산정 보류","error_pct":None,
-                "provisional":True,"fallback_used":False,"dispersion":"-","spread_pct":None,
-                "confidence_reasons":["실제 개별매물 0건"],
-                "median":None,"low":None,"high":None,"prices":[],"adopted":[],
-                "references":strong_ref[:10]+reference[:10],"outliers":[],
-                "reference_prices":[c.get("adjusted_price",c.get("price")) for c in strong_ref if c.get("price")]}
+        return {
+            "status":"hold","count":0,"listing_count":0,
+            "strong_reference_count":len(strong_ref),"reference_count":len(reference),
+            "exact_meta_count":0,"confidence":"산정 보류","error_pct":None,
+            "provisional":True,"fallback_used":False,"dispersion":"-","spread_pct":None,
+            "confidence_reasons":["실제 개별매물 0건"],
+            "median":None,"low":None,"high":None,"prices":[],"adopted":[],
+            "references":strong_ref[:10]+reference[:10],"outliers":[],
+            "reference_prices":[c["adjusted_price"] for c in strong_ref]
+        }
 
-    prices=[c["adjusted_price"] for c in listing if c.get("adjusted_price")]
-    if not prices: return None
-    med=statistics.median(prices)
-    spread=((max(prices)-min(prices))/med*100) if len(prices)>=2 and med else None
+    # 대표 시세는 실제 개별매물만 사용. 강한 참고자료는 절대 섞지 않는다.
+    vals=[c["adjusted_price"] for c in listing]
+    med=statistics.median(vals)
 
+    # 4건 이상일 때만 명백한 극단값을 제거한다.
     filtered=list(listing); outliers=[]
-    if len(listing)>=4 and med:
+    if len(listing)>=4:
+        mad=statistics.median([abs(x-med) for x in vals])
         keep=[]
         for c in listing:
-            p=c.get("adjusted_price")
-            if p and abs(p-med)/med<=0.22: keep.append(c)
-            else: outliers.append(c)
-        if len(keep)>=3: filtered=keep
+            p=c["adjusted_price"]
+            ratio_ok=med*0.78<=p<=med*1.22
+            mad_ok=(mad==0 or abs(p-med)<=max(2.8*mad,med*0.14))
+            if ratio_ok and mad_ok:
+                keep.append(c)
+            else:
+                cc=dict(c); cc["reason"]="실제매물 가격 편차/통계적 이상값"; outliers.append(cc)
+        if len(keep)>=3:
+            filtered=keep
 
-    fp=[c["adjusted_price"] for c in filtered if c.get("adjusted_price")]
-    exact=sum(1 for c in filtered if c.get("year") and c.get("mileage") is not None)
+    prices=sorted(c["adjusted_price"] for c in filtered)
+    wm=weighted_median([(c["adjusted_price"],max(1,c.get("score",1))) for c in filtered])
+    spread_pct=((max(prices)-min(prices))/statistics.median(prices)*100) if len(prices)>=2 else None
+    exact=sum(1 for c in filtered if c.get("year") is not None and c.get("mileage") is not None)
+
     status="provisional"; conf="낮음"; err=12; reasons=[]
     if len(filtered)==1:
         conf="매우 낮음"; err=15; reasons.append("실제 개별매물 1건")
     elif len(filtered)==2:
         reasons.append("실제 개별매물 2건")
-        if spread is not None and spread>=15:
+        if spread_pct is not None and spread_pct>=15:
             status="wide_provisional"; conf="매우 낮음"; err=15
-            reasons.append(f"실제매물 가격 편차 큼({spread:.1f}%)")
-    elif spread is not None and spread>=20:
+            reasons.append(f"실제매물 가격 편차 큼({spread_pct:.1f}%)")
+    elif spread_pct is not None and spread_pct>=20:
         status="wide_provisional"; conf="낮음"; err=12
-        reasons.append(f"실제매물 가격 편차 큼({spread:.1f}%)")
+        reasons.append(f"실제매물 가격 편차 큼({spread_pct:.1f}%)")
     elif exact>=3:
         status="confirmed"; conf="보통"; err=8
     else:
         reasons.append("연식·주행거리 확인 매물 부족")
-    if strong_ref: reasons.append(f"강한 참고자료 {len(strong_ref)}건은 계산에서 제외")
 
-    return {"status":status,"count":len(filtered),"listing_count":len(filtered),
-            "strong_reference_count":len(strong_ref),"reference_count":len(reference),
-            "exact_meta_count":exact,"confidence":conf,"error_pct":err,
-            "provisional":status!="confirmed","fallback_used":False,
-            "dispersion":"큼" if spread is not None and spread>=15 else "보통",
-            "spread_pct":round(spread,1) if spread is not None else None,
-            "confidence_reasons":reasons,"median":round(statistics.median(fp)),
-            "low":round(min(fp)),"high":round(max(fp)),"prices":fp,
-            "adopted":filtered,"references":strong_ref[:10]+reference[:10],
-            "outliers":outliers,
-            "reference_prices":[c.get("adjusted_price",c.get("price")) for c in strong_ref if c.get("price")]}
+    if strong_ref:
+        reasons.append(f"강한 참고자료 {len(strong_ref)}건은 참고용·계산 제외")
+
+    if len(prices)>=4:
+        q=statistics.quantiles(prices,n=4,method="inclusive")
+        low,high=round(q[0]),round(q[2])
+    else:
+        low,high=min(prices),max(prices)
+
+    return {
+        "status":status,"count":len(filtered),"listing_count":len(filtered),
+        "strong_reference_count":len(strong_ref),"reference_count":len(reference),
+        "exact_meta_count":exact,"confidence":conf,"error_pct":err,
+        "provisional":status!="confirmed","fallback_used":False,
+        "dispersion":"큼" if spread_pct is not None and spread_pct>=15 else "보통",
+        "spread_pct":round(spread_pct,1) if spread_pct is not None else None,
+        "confidence_reasons":reasons,
+        "median":round(wm),"low":round(low),"high":round(high),
+        "prices":prices,"adopted":filtered,
+        "references":strong_ref[:10]+reference[:10],
+        "outliers":outliers,
+        "reference_prices":[c["adjusted_price"] for c in strong_ref]
+    }
 
 
 def base_discount(v):
@@ -943,7 +988,7 @@ def analyze(v: Vehicle):
         if not market:
             return JSONResponse({
                 "ok":False,
-                "message":"단계적 검색까지 진행했지만 계산 가능한 비교자료를 확보하지 못했어. 아래 진단정보로 어떤 단계에서 탈락했는지 확인할 수 있어.",
+                "message":"단계적 검색까지 진행했지만 실제 개별매물을 확보하지 못했어. 검색자료는 보존했으며 아래 진단정보에서 제외 사유와 참고자료를 확인할 수 있어.",
                 "queries":queries,
                 "search_stage":search_stage,
                 "relaxed_names":relaxed_names,
