@@ -7,7 +7,7 @@ from html import unescape
 from urllib.parse import urlparse
 import os, re, statistics, requests, traceback
 
-app = FastAPI(title="공매가 AI 8.6.3차")
+app = FastAPI(title="공매가 AI 9.0")
 templates = Jinja2Templates(directory="templates")
 
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
@@ -138,30 +138,6 @@ def facelift_match(target_car,result_text):
     # 검색 제목이 축약되어 상품명이 빠진 경우는 다른 조건으로 계속 검증.
     return True,""
 
-
-def drive_group(text):
-    t=clean_text(text).upper().replace(" ", "")
-    if re.search(r"(4WD|AWD|4륜|사륜|XDRIVE|4MATIC|QUATTRO)", t):
-        return "4WD"
-    if re.search(r"(2WD|2륜|전륜|후륜|FWD|RWD)", t):
-        return "2WD"
-    return ""
-
-def trim_group(text):
-    t=clean_text(text)
-    # 검색 정확도에 영향이 큰 대표 트림명을 우선 추출.
-    trims=[
-        "시그니처 그래비티","그래비티","캘리그래피","인스퍼레이션",
-        "시그니처","노블레스","프레스티지","프리미엄 초이스",
-        "프리미엄","모던 플러스","모던","익스클루시브",
-        "럭셔리","스포츠","에어","어스"
-    ]
-    compact=t.replace(" ","").lower()
-    for trim in trims:
-        if trim.replace(" ","").lower() in compact:
-            return trim
-    return ""
-
 def build_queries(v, stage=1):
     car=(v.car or "").strip()
     core=" ".join(core_model_tokens(car))
@@ -169,44 +145,28 @@ def build_queries(v, stage=1):
     ptword=pt[0] if pt else ""
     fam=facelift_family(car)
     famword={"the_all_new":"디 올 뉴","the_new":"더 뉴","all_new":"올 뉴"}.get(fam,"")
-    drive=drive_group(car) or ""
-    trim=trim_group(car) or ""
     base=" ".join(x for x in [str(v.year),famword,core,ptword] if x).strip()
-
-    # 8.6: 조건을 한꺼번에 풀지 않고 '정확한 상세매물 → 트림 완화 → 주행거리 완화 → 사이트별 확대' 순서로 탐색.
     if stage==1:
         return [
-            f'{base} {drive} {trim} {v.km}km 중고차 판매 매물',
-            f'{base} {drive} {trim} 중고차 판매가 주행거리',
-            f'site:encar.com {base} {drive} {trim}',
-            f'site:kbchachacha.com {base} {drive} {trim}',
-            f'site:kcar.com {base} {drive} {trim}',
+            f'{base} {v.km}km 중고차 판매 매물',
+            f'{base} 중고차 판매가 주행거리',
+            f'site:encar.com {base} 중고차',
+            f'site:kbchachacha.com {base} 중고차',
+            f'site:kcar.com {base} 중고차',
+            f'site:reborncar.co.kr {base} 중고차',
         ]
     if stage==2:
         return [
-            f'{base} {drive} 중고차 매물',
-            f'{base} {drive} 판매중 주행거리 가격',
-            f'site:encar.com {base} {drive}',
-            f'site:kbchachacha.com {base} {drive}',
-            f'site:kcar.com {base} {drive}',
-            f'site:reborncar.co.kr {base} {drive}',
-        ]
-    if stage==3:
-        return [
-            f'{base} 중고차 상세 매물',
-            f'{base} 최초등록 주행거리 판매가',
-            f'{v.year-1} {famword} {core} {ptword} 중고차 매물',
-            f'{v.year+1} {famword} {core} {ptword} 중고차 매물',
-            f'site:encar.com {core} {ptword} {v.year}',
-            f'site:kbchachacha.com {core} {ptword} {v.year}',
-            f'site:kcar.com {core} {ptword} {v.year}',
-            f'site:reborncar.co.kr {core} {ptword} {v.year}',
+            f'{base} 중고차 매물',
+            f'{v.year} {core} {ptword} 판매중 중고차',
+            f'{v.year-1} {core} {ptword} 중고차 매물',
+            f'{v.year+1} {core} {ptword} 중고차 매물',
+            f'{core} {ptword} 최초등록 주행거리 판매가',
         ]
     return [
-        f'{base} 중고차 판매',
-        f'{core} {ptword} 중고차 판매가 주행거리',
-        f'{core} {ptword} 중고차 매물 {v.year}',
-        f'{core} {ptword} 중고차 가격',
+        f'{base} 중고차 가격',
+        f'{core} {ptword} 중고차 시세',
+        f'{core} {ptword} 중고 가격 판매가',
     ]
 
 def relaxed_car_names(v):
@@ -565,58 +525,88 @@ def strong_reference_ok(text, v, model_ok, pt_match, source_drive, source_trim):
     return detail >= 1 and any(x in t for x in ["중고 가격","판매가","중고차 가격","만원"])
 
 
-def listing_detail_quality(title, snippet, url):
-    """0~5. 목록/카테고리 페이지보다 차량 상세매물을 우선하기 위한 품질점수."""
+
+def drive_group(text):
+    t=clean_text(text).upper().replace(" ","")
+    if re.search(r"(4WD|AWD|4륜|사륜|XDRIVE|4MATIC|QUATTRO)",t): return "4WD"
+    if re.search(r"(2WD|2륜|전륜|후륜|FWD|RWD)",t): return "2WD"
+    return ""
+
+def trim_group(text):
+    t=clean_text(text).replace(" ","").lower()
+    trims=["시그니처 그래비티","그래비티","캘리그래피","인스퍼레이션","시그니처",
+           "노블레스","프레스티지","프리미엄 초이스","프리미엄","모던 플러스",
+           "모던","익스클루시브","럭셔리","스포츠","에어","어스"]
+    for x in trims:
+        if x.replace(" ","").lower() in t: return x
+    return ""
+
+def similarity_v90(v, title, snippet, year, mileage, drive, trim):
     text=clean_text(f"{title} {snippet}")
-    u=(url or "").lower()
     score=0
-    if re.search(r"(20\d{2})",text): score+=1
-    if re.search(r"\d[\d,]{2,}\s*km",text,re.I): score+=1
-    if re.search(r"\d[\d,]{2,}\s*만원",text): score+=1
-    if re.search(r"(detail|vehicle|car/|cars/|usedcar/|product|view)",u): score+=1
-    if re.search(r"(판매중|인증중고차|차량번호|최초등록)",text): score+=1
-    # 목록성 문구는 감점
-    if re.search(r"(중고차\s*\d+\s*대|시세표|가격표|전체매물|검색결과|목록)",text): score-=2
-    return score
+    detail=[]
 
-def likely_listing_collection(title, snippet, url):
-    text=clean_text(f"{title} {snippet}")
-    return bool(re.search(r"(중고차\s*\d+\s*대|전체매물|검색결과|매물목록|시세표|가격표)",text))
+    # 모델은 후보 추출 단계에서 기본 검증됨. 여기서는 핵심 토큰 일치도를 가점.
+    core=[x.lower() for x in core_model_tokens(v.car) if len(x)>=2]
+    hit=sum(1 for x in core if x in text.lower())
+    if core:
+        model_pts=25*(hit/len(core))
+        score+=model_pts; detail.append(("모델",round(model_pts,1)))
 
+    # 동력원
+    tp=powertrain_group(v.car); rp=powertrain_group(text)
+    if tp and rp and tp[0]==rp[0]:
+        score+=15; detail.append(("동력원",15))
+    elif tp and not rp:
+        score+=7; detail.append(("동력원미확인",7))
 
-def listing_candidate_quality(title, snippet, url, year=None, mileage=None, price=None,
-                              target_trim="", target_drive=""):
-    """검색결과가 '차량 1대'를 특정할 수 있는지 평가. 목록/시세표는 승격 불가."""
-    text=clean_text(f"{title} {snippet}")
-    if likely_listing_collection(title, snippet, url):
-        return 0, ["목록/시세페이지"]
-
-    score=0
-    why=[]
-    if price:
-        score+=2; why.append("가격")
+    # 연식
     if year:
-        score+=1; why.append("연식")
-    if mileage is not None:
-        score+=2; why.append("주행거리")
-    if target_trim and trim_group(text)==target_trim:
-        score+=1; why.append("트림")
-    if target_drive and drive_group(text)==target_drive:
-        score+=1; why.append("구동")
-    if re.search(r"(인증중고차|차량번호|최초등록|판매중|A/T|오토)",text,re.I):
-        score+=1; why.append("개별차량표현")
-    if re.search(r"(detail|vehicle|product|view|car/|cars/|usedcar/)",(url or "").lower()):
-        score+=1; why.append("상세URL")
-    return score, why
+        dy=abs(year-v.year)
+        pts=max(0,20-dy*10)
+        score+=pts; detail.append(("연식",pts))
 
-def can_promote_listing_candidate(title, snippet, url, year, mileage, price,
-                                  target_trim="", target_drive=""):
-    q, why=listing_candidate_quality(
-        title,snippet,url,year,mileage,price,target_trim,target_drive
-    )
-    # 가격은 필수. 그리고 차량을 특정할 수 있도록 주행거리 + 추가 정보가 필요.
-    ok=bool(price and mileage is not None and q>=5)
-    return ok,q,why
+    # 주행거리
+    if mileage is not None:
+        dk=abs(mileage-v.km)
+        pts=max(0,20-(dk/10000)*4)
+        score+=pts; detail.append(("주행거리",round(pts,1)))
+
+    # 구동
+    td=drive_group(v.car); rd=drive or drive_group(text)
+    if td and rd:
+        pts=5 if td==rd else 2
+        score+=pts; detail.append(("구동",pts))
+
+    # 트림
+    tt=trim_group(v.car); rt=trim or trim_group(text)
+    if tt and rt:
+        pts=10 if tt==rt else 4
+        score+=pts; detail.append(("트림",pts))
+    elif tt and not rt:
+        score+=2; detail.append(("트림미확인",2))
+
+    return round(min(100,score),1), detail
+
+def hard_reject_v90(v, title, snippet, url):
+    """9.0은 명백한 오류만 강제 제외한다."""
+    text=clean_text(f"{title} {snippet}")
+    if re.search(r"(시세표|가격표|전체매물|중고차\s*\d+\s*대|검색결과)",text):
+        return "목록/시세자료"
+    tp=powertrain_group(v.car); rp=powertrain_group(text)
+    if tp and rp and tp[0]!=rp[0]:
+        return "동력원 불일치"
+    tf=facelift_family(v.car); rf=facelift_family(text)
+    if tf and rf and tf!=rf:
+        return "세대/페이스리프트 불일치"
+    if (not tf) and rf:
+        return "세대/페이스리프트 불일치"
+    return ""
+
+def weighted_mean_v90(items):
+    if not items: return None
+    sw=sum(max(1,float(x.get("weight",1))) for x in items)
+    return sum(float(x["adjusted_price"])*max(1,float(x.get("weight",1))) for x in items)/sw
 
 def _extract_candidates_core(results,v):
     accepted=[]; rejected=[]
@@ -677,26 +667,7 @@ def _extract_candidates_core(results,v):
                 reason=f"연식 범위 초과({yr})"
             elif km and abs(km-v.km)>40000:
                 reason=f"주행거리 범위 초과({km:,}km)"
-            # 8.6: '쏘렌토 중고차 68대' 같은 목록 페이지는 실제 개별매물로 인정하지 않는다.
-            if stype=="listing" and likely_listing_collection(title, snippet, url):
-                stype="reference"
-                reason="목록/검색결과 페이지 · 개별매물 아님"
-            elif stype=="listing" and listing_detail_quality(title, snippet, url)<2:
-                stype="listing_candidate"
-                reason="실매물 후보 · 2차 검증 필요"
-
-            # 8.6.2: 상세 URL이 불명확해도 가격+주행거리+연식/트림 등으로
-            # 차량 1대를 특정할 수 있으면 '검증 후보'로 승격.
-            if stype in ("unknown","reference","listing_candidate") and not likely_listing_collection(title, snippet, url):
-                promote,q,why=can_promote_listing_candidate(
-                    title,snippet,url,yr,km,price,
-                    trim_group(v.car),drive_group(v.car)
-                )
-                if promote:
-                    stype="listing_candidate"
-                    reason="실매물 후보 · 개별차량 정보 확인(" + ",".join(why) + ")"
-
-            if stype in ("unknown","reference"):
+            elif stype in ("unknown","reference"):
                 if stype=="reference" and stale_reference(text):
                     reason="오래된 시세자료"
                 elif strong_reference_ok(text, v, model_ok, pt_match, source_drive, source_trim):
@@ -706,11 +677,6 @@ def _extract_candidates_core(results,v):
 
             score=min(core_hits,3)*4 + min(kw_hits,4)
             if stype=="listing":
-                score += max(0, listing_detail_quality(title, snippet, url))*3
-            elif stype=="listing_candidate":
-                # 실제 상세매물보다 낮은 신뢰도로 계산에 참여.
-                score += max(0, listing_detail_quality(title, snippet, url))*2
-                score -= 6
                 score += 7
             elif stype=="strong_reference":
                 score += 2
@@ -855,180 +821,77 @@ def weighted_median(values):
             return value
     return arr[-1][0]
 
-
-def recover_listing_candidates(cands, v):
-    """8.6.3 복구패스: 엄격 필터 뒤에도 남은 검색자료를 개별차량 증거로 재검증한다.
-    모델/동력원/세대가 명백히 틀린 자료와 목록페이지는 절대 복구하지 않는다.
-    """
-    out=[]
-    target_model=" ".join(core_model_tokens(v.car)).lower()
-    target_pt=powertrain_group(v.car)
-    target_fam=facelift_family(v.car)
-    for c in cands:
-        title=c.get("title",""); snippet=c.get("snippet",""); url=c.get("url","")
-        text=clean_text(f"{title} {snippet}")
-        if likely_listing_collection(title,snippet,url):
-            continue
-        # hard mismatches remain hard rejects
-        if target_model:
-            toks=[x for x in target_model.split() if len(x)>=2]
-            if toks and not any(t in text.lower() for t in toks):
-                continue
-        rpt=powertrain_group(text)
-        if target_pt and rpt and target_pt[0] != rpt[0]:
-            continue
-        rf=facelift_family(text)
-        if target_fam and rf and target_fam != rf:
-            continue
-        if (not target_fam) and rf:
-            continue
-
-        price=c.get("price")
-        yr=c.get("year")
-        km=c.get("mileage")
-        ok,q,why=can_promote_listing_candidate(
-            title,snippet,url,yr,km,price,trim_group(v.car),drive_group(v.car)
-        )
-        if not ok:
-            continue
-        cc=dict(c)
-        cc["source_type"]="listing_candidate"
-        cc["score"]=max(20,cc.get("score",0)-8)
-        cc["reason"]="복구 실매물 후보 · " + ",".join(why)
-        out.append(cc)
-
-    # exact duplicate suppression
-    uniq=[]; seen=set()
-    for c in sorted(out,key=lambda x:-x.get("score",0)):
-        key=((c.get("url") or "").split("?")[0].rstrip("/").lower(),
-             clean_text(c.get("title") or "").lower(),c.get("price"))
-        if key in seen: continue
-        seen.add(key); uniq.append(c)
-    return uniq[:5]
-
 def robust_market(cands):
-    if not cands:
-        return None
+    raw=sorted([c for c in cands if c.get("source_type")=="listing"],
+               key=lambda c:-c.get("similarity_v90",c.get("score",0)))
+    refs=sorted([c for c in cands if c.get("source_type")=="strong_reference"],
+                key=lambda c:-c.get("score",0))
 
-    raw_listing=sorted([c for c in cands if c.get("source_type")=="listing"],key=lambda c:-c.get("score",0))
-    raw_candidate=sorted([c for c in cands if c.get("source_type")=="listing_candidate"],key=lambda c:-c.get("score",0))
-    raw_strong=sorted([c for c in cands if c.get("source_type")=="strong_reference"],key=lambda c:-c.get("score",0))
-    reference=[c for c in cands if c.get("source_type") not in ("listing","strong_reference")]
+    def enrich(c,ref=False):
+        x=dict(c)
+        p=float(x["price"])
+        p=normalize_year(p,x.get("year"),x.get("target_year"))
+        p=adjust_km(p,x.get("mileage"),x.get("target_km"))
+        p*=1+(x.get("drive_adjust_pct",0)/100)
+        p*=1+(x.get("trim_adjust_pct",0)/100)
+        x["adjusted_price"]=round(p)
+        x["calc_role"]="참고용·계산 제외" if ref else "유사도 가중 계산"
+        sim=float(x.get("similarity_v90",x.get("score",55)))
+        x["weight"]=max(0.15,min(1.0,(sim-45)/45))
+        return x
 
-    def enrich(c, reference_only=False):
-        # 8.5.4: 검색자료와 계산자료를 분리하되, 보정가격 생성은 여기서 공통 처리.
-        adj=normalize_year(c["price"],c.get("year"),c.get("target_year"))
-        adj=adjust_km(adj,c.get("mileage"),c.get("target_km"))
-        drive_adj=float(c.get("drive_adjust_pct") or 0)
-        trim_adj=float(c.get("trim_adjust_pct") or 0)
-        adj=adj*(1+drive_adj)*(1+trim_adj)
-        cc=dict(c)
-        cc["adjusted_price"]=round(adj)
-        notes=[]
-        if drive_adj: notes.append(f"구동 {drive_adj*100:+.0f}%")
-        if trim_adj: notes.append(f"트림 {trim_adj*100:+.1f}%")
-        if reference_only: notes.append("참고용·계산 제외")
-        cc["adjustment_note"]=" / ".join(notes) if notes else "연식·주행거리 보정"
-        return cc
+    listing=[enrich(c) for c in raw]
+    strong=[enrich(c,True) for c in refs]
 
-    # 검색에서 확보한 실제매물은 계산 후보로 보존한다.
-    listing=[enrich(c) for c in raw_listing]
-    listing_candidate=[enrich(c) for c in raw_candidate]
-    strong_ref=[enrich(c,True) for c in raw_strong]
+    if not listing:
+        refvals=[x["adjusted_price"] for x in strong]
+        return {"status":"hold","count":0,"listing_count":0,
+                "references":strong,"strong_reference_count":len(strong),
+                "reference_low":min(refvals) if refvals else None,
+                "reference_high":max(refvals) if refvals else None,
+                "reference_median":round(statistics.median(refvals)) if refvals else None,
+                "confidence":"산정 보류","error_pct":None,
+                "reasons":["계산 가능한 비교매물 0건"]}
 
-    # 상세매물이 부족할 때만 검증 후보를 보조 계산자료로 사용한다.
-    # 후보는 최대 3건, 실제 상세매물보다 낮은 신뢰도로 취급.
-    candidate_used=[]
-    if len(listing)<3 and listing_candidate:
-        need=3-len(listing)
-        candidate_used=listing_candidate[:need]
-    calc_listing=listing+candidate_used
-
-    # 상세매물/검증 후보 모두 0건일 때만 산정 보류.
-    if not calc_listing:
-        return {
-            "status":"hold","count":0,"listing_count":0,"candidate_count":len(listing_candidate),"candidate_used_count":0,
-            "strong_reference_count":len(strong_ref),"reference_count":len(reference),
-            "exact_meta_count":0,"confidence":"산정 보류","error_pct":None,
-            "provisional":True,"fallback_used":False,"dispersion":"-","spread_pct":None,
-            "confidence_reasons":["실제 개별매물 0건"],
-            "median":None,"low":None,"high":None,"prices":[],"adopted":[],
-            "references":strong_ref[:10]+reference[:10],"outliers":[],
-            "reference_prices":[c["adjusted_price"] for c in strong_ref]
-        }
-
-    # 대표 시세는 실제 개별매물만 사용. 강한 참고자료는 절대 섞지 않는다.
-    listing=calc_listing
-    vals=[c["adjusted_price"] for c in listing]
+    # 4건 이상이면 극단치 1차 제거(IQR 대신 중앙값 대비 30% 초과만 제거)
+    vals=[x["adjusted_price"] for x in listing]
     med=statistics.median(vals)
+    filtered=[x for x in listing if abs(x["adjusted_price"]-med)/med<=0.30] if len(listing)>=4 else listing
+    if len(filtered)<2: filtered=listing
 
-    # 4건 이상일 때만 명백한 극단값을 제거한다.
-    filtered=list(listing); outliers=[]
-    if len(listing)>=4:
-        mad=statistics.median([abs(x-med) for x in vals])
-        keep=[]
-        for c in listing:
-            p=c["adjusted_price"]
-            ratio_ok=med*0.78<=p<=med*1.22
-            mad_ok=(mad==0 or abs(p-med)<=max(2.8*mad,med*0.14))
-            if ratio_ok and mad_ok:
-                keep.append(c)
-            else:
-                cc=dict(c); cc["reason"]="실제매물 가격 편차/통계적 이상값"; outliers.append(cc)
-        if len(keep)>=3:
-            filtered=keep
+    vals=[x["adjusted_price"] for x in filtered]
+    low=min(vals); high=max(vals)
+    spread=(high-low)/((high+low)/2)*100 if high>0 else 0
 
-    prices=sorted(c["adjusted_price"] for c in filtered)
-    wm=weighted_median([(c["adjusted_price"],max(1,c.get("score",1))) for c in filtered])
-    spread_pct=((max(prices)-min(prices))/statistics.median(prices)*100) if len(prices)>=2 else None
-    exact=sum(1 for c in filtered if c.get("year") is not None and c.get("mileage") is not None)
+    # 2건 이하 + 큰 편차: 8.5.5 안전정책 유지
+    if len(filtered)<=2 and spread>=15:
+        return {"status":"spread_hold","count":len(filtered),"listing_count":len(filtered),
+                "adopted":filtered,"references":strong,
+                "low":low,"high":high,"spread_pct":round(spread,1),
+                "confidence":"매우 낮음","error_pct":15,
+                "strong_reference_count":len(strong),
+                "reasons":[f"비교매물 {len(filtered)}건 · 가격 편차 {spread:.1f}%","단일 대표가격 산정 보류"]}
 
-    status="provisional"; conf="낮음"; err=12; reasons=[]
-    if len(filtered)==1:
-        conf="매우 낮음"; err=15; reasons.append("실제 개별매물 1건")
-    elif len(filtered)==2:
-        reasons.append("실제 개별매물 2건")
-        if spread_pct is not None and spread_pct>=15:
-            status="wide_provisional"; conf="매우 낮음"; err=15
-            reasons.append(f"실제매물 가격 편차 큼({spread_pct:.1f}%)")
-    elif spread_pct is not None and spread_pct>=20:
-        status="wide_provisional"; conf="낮음"; err=12
-        reasons.append(f"실제매물 가격 편차 큼({spread_pct:.1f}%)")
-    elif exact>=3:
-        status="confirmed"; conf="보통"; err=8
+    rep=round(weighted_mean_v90(filtered))
+    sims=[float(x.get("similarity_v90",0)) for x in filtered]
+    avgsim=sum(sims)/len(sims)
+    if len(filtered)>=4 and avgsim>=75 and spread<15:
+        conf="높음"; err=7; status="confirmed"
+    elif len(filtered)>=3 and avgsim>=65 and spread<20:
+        conf="보통"; err=10; status="confirmed"
     else:
-        reasons.append("연식·주행거리 확인 매물 부족")
+        conf="낮음"; err=12; status="provisional"
 
-    if candidate_used:
-        reasons.append(f"실매물 후보 {len(candidate_used)}건 보조 사용 · 신뢰도 제한")
-        if conf=="보통":
-            conf="낮음"; err=max(err,12); status="provisional"
-    if strong_ref:
-        reasons.append(f"강한 참고자료 {len(strong_ref)}건은 참고용·계산 제외")
-
-    if len(prices)>=4:
-        q=statistics.quantiles(prices,n=4,method="inclusive")
-        low,high=round(q[0]),round(q[2])
-    else:
-        low,high=min(prices),max(prices)
-
-    return {
-        "status":status,"count":len(filtered),
-            "listing_count":len([c for c in filtered if c.get("source_type")=="listing"]),
-            "candidate_count":len(listing_candidate),
-            "candidate_used_count":len([c for c in filtered if c.get("source_type")=="listing_candidate"]),
-        "strong_reference_count":len(strong_ref),"reference_count":len(reference),
-        "exact_meta_count":exact,"confidence":conf,"error_pct":err,
-        "provisional":status!="confirmed","fallback_used":False,
-        "dispersion":"큼" if spread_pct is not None and spread_pct>=15 else "보통",
-        "spread_pct":round(spread_pct,1) if spread_pct is not None else None,
-        "confidence_reasons":reasons,
-        "median":round(wm),"low":round(low),"high":round(high),
-        "prices":prices,"adopted":filtered,
-        "references":strong_ref[:10]+reference[:10],
-        "outliers":outliers,
-        "reference_prices":[c["adjusted_price"] for c in strong_ref]
-    }
+    reasons=[f"유사도 가중 비교매물 {len(filtered)}건",
+             f"평균 유사도 {avgsim:.1f}점",
+             f"가격 편차 {spread:.1f}%"]
+    if strong:
+        reasons.append(f"강한 참고자료 {len(strong)}건은 계산 제외")
+    return {"status":status,"count":len(filtered),"listing_count":len(filtered),
+            "median":rep,"market_price":rep,"low":low,"high":high,
+            "spread_pct":round(spread,1),"confidence":conf,"error_pct":err,
+            "adopted":filtered,"references":strong,
+            "strong_reference_count":len(strong),"reasons":reasons}
 
 
 def base_discount(v):
@@ -1158,52 +1021,33 @@ def analyze(v: Vehicle):
                         "target_year":v.year,"target_km":v.km
                     })
 
-        # 8.6: 여러 검색어에서 같은 상세매물이 반복 노출되는 경우 1건으로만 계산.
-        uniq=[]
-        seen=set()
+        # 9.0: 엄격한 통과/탈락 대신 명백한 오류만 제외하고 유사도 점수로 영향력을 조절.
+        rescored=[]
         for c in accepted:
-            if c.get("source_type") in ("listing","listing_candidate"):
-                key=((c.get("url") or "").split("?")[0].rstrip("/").lower(),
-                     clean_text(c.get("title") or "").lower(),
-                     c.get("price"))
-            else:
-                key=(c.get("source_type"),(c.get("url") or "").split("?")[0].rstrip("/").lower(),
-                     clean_text(c.get("title") or "").lower(),c.get("price"))
-            if key in seen:
+            if c.get("source_type") not in ("listing","strong_reference"):
+                rescored.append(c); continue
+            hr=hard_reject_v90(v,c.get("title",""),c.get("snippet",""),c.get("url",""))
+            if hr:
+                cc=dict(c); cc["reason"]=hr
+                rejected.append(cc)
                 continue
-            seen.add(key)
-            uniq.append(c)
-        accepted=uniq
-
-        # 8.6.3: 엄격 판정 결과 실제/후보가 하나도 없으면 검색자료를 한 번 더 재검증.
-        usable=[c for c in accepted if c.get("source_type") in ("listing","listing_candidate")]
-        if not usable:
-            recovery_pool=list(accepted)
-            # rejected 항목도 원본 필드가 보존된 경우에 한해 재검증한다.
-            recovery_pool += [c for c in rejected if isinstance(c,dict)]
-            recovered=recover_listing_candidates(recovery_pool,v)
-            if recovered:
-                accepted.extend(recovered)
+            sim,parts=similarity_v90(
+                v,c.get("title",""),c.get("snippet",""),
+                c.get("year"),c.get("mileage"),c.get("drive"),c.get("trim")
+            )
+            cc=dict(c)
+            cc["similarity_v90"]=sim
+            cc["similarity_parts"]=parts
+            # 55점 미만은 계산에서 제외하되 진단에는 보존.
+            if c.get("source_type")=="listing" and sim<55:
+                cc["reason"]=f"유사도 낮음({sim}점)"
+                rejected.append(cc)
+                continue
+            cc["score"]=sim
+            rescored.append(cc)
+        accepted=rescored
 
         market=robust_market(accepted)
-
-        # 8.5.5: 표본이 2건 이하인데 가격 편차가 15% 이상이면
-        # 대표 소매시세·추천 입찰가·절대 상한을 강제로 산출하지 않는다.
-        if market and market.get("status")=="wide_provisional" and market.get("count",0)<=2:
-            return {
-                "ok":True,
-                "status":"spread_hold",
-                "message":"실제 개별매물은 확보했지만 가격 편차가 커서 대표 소매시세와 추천 공매가 산정을 보류했어.",
-                "market":market,
-                "listing_market":{
-                    "low":market.get("low"),
-                    "high":market.get("high"),
-                    "spread_pct":market.get("spread_pct"),
-                    "count":market.get("listing_count")
-                },
-                "rejected":rejected[:60],
-                "search_errors":errors
-            }
 
         if market and market.get("status")=="hold":
             rp=market.get("reference_prices") or []
@@ -1220,7 +1064,7 @@ def analyze(v: Vehicle):
         if not market:
             return JSONResponse({
                 "ok":False,
-                "message":"단계적 검색과 실매물 후보 복구검증까지 진행했지만 계산 가능한 개별차량 자료를 확보하지 못했어. 이 경우에는 참고자료만으로 공매가를 만들지 않아.",
+                "message":"단계적 검색까지 진행했지만 실제 개별매물을 확보하지 못했어. 검색자료는 보존했으며 아래 진단정보에서 제외 사유와 참고자료를 확인할 수 있어.",
                 "queries":queries,
                 "search_stage":search_stage,
                 "relaxed_names":relaxed_names,
