@@ -7,7 +7,7 @@ from html import unescape
 from urllib.parse import urlparse
 import os, re, statistics, requests, traceback
 
-app = FastAPI(title="공매가 AI 8.5.2차")
+app = FastAPI(title="공매가 AI 8.5.3차")
 templates = Jinja2Templates(directory="templates")
 
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
@@ -738,173 +738,66 @@ def weighted_median(values):
     return arr[-1][0]
 
 def robust_market(cands):
-    if not cands:
-        return None
+    listing=sorted([c for c in cands if c.get("source_type")=="listing"],key=lambda c:-c.get("score",0))
+    strong_ref=sorted([c for c in cands if c.get("source_type")=="strong_reference"],key=lambda c:-c.get("score",0))
+    reference=[c for c in cands if c.get("source_type")=="reference"]
 
-    listing=[c for c in cands if c["source_type"]=="listing"]
-    strong_ref=[c for c in cands if c["source_type"]=="strong_reference"]
-    reference=[c for c in cands if c["source_type"] not in ("listing","strong_reference")]
+    # 8.5.3: 강한 참고자료는 대표 소매시세 계산에 참여시키지 않는다.
+    if not listing:
+        return {"status":"hold","count":0,"listing_count":0,
+                "strong_reference_count":len(strong_ref),"reference_count":len(reference),
+                "exact_meta_count":0,"confidence":"산정 보류","error_pct":None,
+                "provisional":True,"fallback_used":False,"dispersion":"-","spread_pct":None,
+                "confidence_reasons":["실제 개별매물 0건"],
+                "median":None,"low":None,"high":None,"prices":[],"adopted":[],
+                "references":strong_ref[:10]+reference[:10],"outliers":[],
+                "reference_prices":[c.get("adjusted_price",c.get("price")) for c in strong_ref if c.get("price")]}
 
-    # 실제 개별매물을 최우선으로 사용.
-    # 3건 미만일 때만 강한 참고자료를 최대 3건까지 보조로 사용한다.
-    if len(listing)==0:
-        return {
-            "status":"hold","count":0,"listing_count":0,
+    prices=[c["adjusted_price"] for c in listing if c.get("adjusted_price")]
+    if not prices: return None
+    med=statistics.median(prices)
+    spread=((max(prices)-min(prices))/med*100) if len(prices)>=2 and med else None
+
+    filtered=list(listing); outliers=[]
+    if len(listing)>=4 and med:
+        keep=[]
+        for c in listing:
+            p=c.get("adjusted_price")
+            if p and abs(p-med)/med<=0.22: keep.append(c)
+            else: outliers.append(c)
+        if len(keep)>=3: filtered=keep
+
+    fp=[c["adjusted_price"] for c in filtered if c.get("adjusted_price")]
+    exact=sum(1 for c in filtered if c.get("year") and c.get("mileage") is not None)
+    status="provisional"; conf="낮음"; err=12; reasons=[]
+    if len(filtered)==1:
+        conf="매우 낮음"; err=15; reasons.append("실제 개별매물 1건")
+    elif len(filtered)==2:
+        reasons.append("실제 개별매물 2건")
+        if spread is not None and spread>=15:
+            status="wide_provisional"; conf="매우 낮음"; err=15
+            reasons.append(f"실제매물 가격 편차 큼({spread:.1f}%)")
+    elif spread is not None and spread>=20:
+        status="wide_provisional"; conf="낮음"; err=12
+        reasons.append(f"실제매물 가격 편차 큼({spread:.1f}%)")
+    elif exact>=3:
+        status="confirmed"; conf="보통"; err=8
+    else:
+        reasons.append("연식·주행거리 확인 매물 부족")
+    if strong_ref: reasons.append(f"강한 참고자료 {len(strong_ref)}건은 계산에서 제외")
+
+    return {"status":status,"count":len(filtered),"listing_count":len(filtered),
             "strong_reference_count":len(strong_ref),"reference_count":len(reference),
-            "exact_meta_count":0,"confidence":"산정 보류","error_pct":None,
-            "provisional":True,"fallback_used":False,"dispersion":"-","spread_pct":None,
-            "confidence_reasons":["실제 개별매물 0건"],"median":None,"low":None,"high":None,
-            "prices":[],"adopted":[],"references":strong_ref[:10]+reference[:10],
-            "outliers":[],"reference_prices":[c.get("price") for c in strong_ref if c.get("price")]
-        }
+            "exact_meta_count":exact,"confidence":conf,"error_pct":err,
+            "provisional":status!="confirmed","fallback_used":False,
+            "dispersion":"큼" if spread is not None and spread>=15 else "보통",
+            "spread_pct":round(spread,1) if spread is not None else None,
+            "confidence_reasons":reasons,"median":round(statistics.median(fp)),
+            "low":round(min(fp)),"high":round(max(fp)),"prices":fp,
+            "adopted":filtered,"references":strong_ref[:10]+reference[:10],
+            "outliers":outliers,
+            "reference_prices":[c.get("adjusted_price",c.get("price")) for c in strong_ref if c.get("price")]}
 
-    market_pool=list(listing)
-    fallback_used=False
-    if len(market_pool)<3 and strong_ref:
-        fallback_used=True
-        need=max(0,3-len(market_pool))
-        strong_ref=sorted(strong_ref,key=lambda c:-c["score"])
-        market_pool += strong_ref[:min(2,need)]
-
-    enriched=[]
-    for c in market_pool:
-        adj=normalize_year(c["price"],c.get("year"),c["target_year"])
-        adj=adjust_km(adj,c.get("mileage"),c["target_km"])
-        drive_adj=float(c.get("drive_adjust_pct") or 0)
-        trim_adj=float(c.get("trim_adjust_pct") or 0)
-        adj=adj*(1+drive_adj)*(1+trim_adj)
-        cc=dict(c)
-        cc["adjusted_price"]=round(adj)
-        notes=[]
-        if drive_adj:
-            notes.append(f"구동 {drive_adj*100:+.0f}%")
-        if trim_adj:
-            notes.append(f"트림 {trim_adj*100:+.1f}%")
-        if c["source_type"]=="strong_reference":
-            notes.append("강한 참고자료")
-        cc["adjustment_note"]=" / ".join(notes) if notes else "연식·주행거리 보정"
-        enriched.append(cc)
-
-    vals=[c["adjusted_price"] for c in enriched]
-    med=statistics.median(vals)
-    mad=statistics.median([abs(x-med) for x in vals]) if vals else 0
-
-    filtered=[]
-    out=[]
-    for c in enriched:
-        p=c["adjusted_price"]
-        ratio_ok=med*0.78<=p<=med*1.22
-        mad_ok=(mad==0 or abs(p-med)<=max(2.8*mad,med*0.14))
-        if ratio_ok and mad_ok:
-            filtered.append(c)
-        else:
-            cc=dict(c)
-            cc["reason"]="비교자료 가격 편차/통계적 이상값"
-            out.append(cc)
-
-    if not filtered:
-        filtered=enriched
-        out=[]
-
-    wm=weighted_median([
-        (c["adjusted_price"],max(1,c["score"]))
-        for c in filtered
-    ])
-    prices=sorted(c["adjusted_price"] for c in filtered)
-
-    if len(prices)>=4:
-        q=statistics.quantiles(prices,n=4,method="inclusive")
-        low,high=round(q[0]),round(q[2])
-    else:
-        low,high=min(prices),max(prices)
-
-    lc=sum(1 for c in filtered if c["source_type"]=="listing")
-    src_count=len(filtered)
-    exact_listing_meta=sum(
-        1 for c in filtered
-        if c.get("source_type")=="listing"
-        and c.get("year") is not None
-        and c.get("mileage") is not None
-    )
-    strong_ref_count=sum(1 for c in filtered if c["source_type"]=="strong_reference")
-
-    spread_ratio=((max(prices)-min(prices))/wm) if len(prices)>=2 and wm else 0
-    if spread_ratio>=0.25:
-        dispersion="큼"
-    elif spread_ratio>=0.15:
-        dispersion="보통"
-    else:
-        dispersion="작음"
-
-    reasons=[]
-    if lc < 3:
-        reasons.append("실제 개별매물 3건 미만")
-    if exact_listing_meta < 3:
-        reasons.append("연식+주행거리 확인 개별매물 3건 미만")
-    if strong_ref_count:
-        reasons.append(f"강한 참고자료 {strong_ref_count}건 보조 사용")
-    if dispersion=="큼":
-        reasons.append("비교자료 간 가격 편차 큼")
-
-    # 강한 참고자료가 들어가면 신뢰도 상한을 '낮음'으로 제한.
-    if strong_ref_count:
-        conf="낮음"; err=12
-    elif lc>=5 and exact_listing_meta>=5 and dispersion=="작음":
-        conf="높음"; err=4
-    elif lc>=3 and exact_listing_meta>=3 and dispersion!="큼":
-        conf="보통"; err=7
-    elif lc>=2 and exact_listing_meta>=2:
-        conf="낮음"; err=10
-    else:
-        conf="매우 낮음"; err=15
-
-    if dispersion=="큼":
-        if conf=="높음":
-            conf="보통"; err=max(err,7)
-        elif conf=="보통":
-            conf="낮음"; err=max(err,10)
-        elif conf=="낮음":
-            conf="매우 낮음"; err=max(err,15)
-
-    provisional = (lc < 3 or exact_listing_meta < 3 or dispersion=="큼" or strong_ref_count>0)
-
-    # 일반 참고자료는 계산에서 제외, 화면 검증용으로만 보관.
-    ref_preview=[]
-    for c in (strong_ref + reference)[:15]:
-        cc=dict(c)
-        adj=normalize_year(c["price"],c.get("year"),c["target_year"])
-        adj=adjust_km(adj,c.get("mileage"),c["target_km"])
-        drive_adj=float(c.get("drive_adjust_pct") or 0)
-        trim_adj=float(c.get("trim_adjust_pct") or 0)
-        adj=adj*(1+drive_adj)*(1+trim_adj)
-        cc["adjusted_price"]=round(adj)
-        ref_preview.append(cc)
-
-    return {
-        "status":"confirmed" if lc>=3 and exact_listing_meta>=3 and strong_ref_count==0 else "provisional",
-        "count":len(filtered),
-        "listing_count":lc,
-        "strong_reference_count":strong_ref_count,
-        "reference_count":len(reference),
-        "exact_meta_count":exact_listing_meta,
-        "confidence":conf,
-        "error_pct":err,
-        "provisional":provisional,
-        "fallback_used":fallback_used,
-        "dispersion":dispersion,
-        "spread_pct":round(spread_ratio*100,1),
-        "confidence_reasons":reasons,
-        "median":int(round(wm)),
-        "low":int(low),
-        "high":int(high),
-        "prices":prices[:30],
-        "adopted":sorted(
-            filtered,
-            key=lambda c:(0 if c["source_type"]=="listing" else 1,-c["score"],abs(c["adjusted_price"]-wm))
-        )[:20],
-        "references":ref_preview,
-        "outliers":out[:20]
-    }
 
 def base_discount(v):
     age=max(0,2026-v.year)
