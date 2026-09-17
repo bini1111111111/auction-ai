@@ -7,7 +7,7 @@ from html import unescape
 from urllib.parse import urlparse
 import os, re, statistics, requests, traceback
 
-app = FastAPI(title="공매가 AI 8.4.4차")
+app = FastAPI(title="공매가 AI 8.5차")
 templates = Jinja2Templates(directory="templates")
 
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
@@ -117,15 +117,33 @@ def dedupe_results(results):
         out.append(y)
     return out
 
-def build_queries(v):
-    km_man = max(1, round(v.km / 10000))
-    c = v.car.strip()
+def build_queries(v,stage):
+    car=(v.car or "").strip()
+    core=" ".join(core_model_tokens(car))
+    pt=powertrain_group(car)
+    ptword=pt[0] if pt else ""
+    base=" ".join(x for x in [str(v.year),core,ptword] if x).strip()
+    if stage==1:
+        return [
+            f'{base} {v.km}km 중고차 판매 매물',
+            f'{base} 중고차 판매가 주행거리',
+            f'site:encar.com {base} 중고차',
+            f'site:kbchachacha.com {base} 중고차',
+            f'site:kcar.com {base} 중고차',
+            f'site:reborncar.co.kr {base} 중고차',
+        ]
+    if stage==2:
+        return [
+            f'{base} 중고차 매물',
+            f'{v.year} {core} {ptword} 판매중 중고차',
+            f'{v.year-1} {core} {ptword} 중고차 매물',
+            f'{v.year+1} {core} {ptword} 중고차 매물',
+            f'{core} {ptword} 최초등록 주행거리 판매가',
+        ]
     return [
-        f'"{c}" {v.year} {km_man}만km 중고차 매물',
-        f'{v.year}년식 "{c}" {km_man}만km 판매가',
-        f'site:encar.com {v.year} "{c}" {km_man}만km',
-        f'site:kbchachacha.com {v.year} "{c}" {km_man}만km',
-        f'site:kcar.com {v.year} "{c}" {km_man}만km',
+        f'{base} 중고차 가격',
+        f'{core} {ptword} 중고차 시세',
+        f'{core} {ptword} 중고 가격 판매가',
     ]
 
 def relaxed_car_names(v):
@@ -433,6 +451,26 @@ def source_type(text, domain, url="", year=None, km=None):
     return "unknown"
 
 
+def extract_reference_year(text):
+    t=(text or "").lower()
+    pats=[
+        r"(20\d{2})\s*년\s*\d{1,2}\s*월\s*(?:기준|작성|게시)?",
+        r"(?<!\d)(\d{2})\s*년\s*\d{1,2}\s*월\s*기준",
+        r"(20\d{2})\s*년\s*기준",
+        r"(?<!\d)(\d{2})\s*년\s*기준",
+    ]
+    ys=[]
+    for pat in pats:
+        for m in re.finditer(pat,t):
+            y=int(m.group(1))
+            if y<100: y+=2000
+            if 2000<=y<=2035: ys.append(y)
+    return max(ys) if ys else None
+
+def stale_reference(text):
+    y=extract_reference_year(text)
+    return bool(y and y < 2024)
+
 def is_guide_or_price_article(text, domain):
     t=(text or "").lower()
     d=(domain or "").lower()
@@ -446,6 +484,8 @@ def strong_reference_ok(text, v, model_ok, pt_match, source_drive, source_trim):
     최종 시세 계산에는 실제 매물이 부족할 때만 보조적으로 사용한다.
     """
     if not model_ok or not pt_match:
+        return False
+    if stale_reference(text):
         return False
     t=(text or "").lower()
 
@@ -519,7 +559,9 @@ def _extract_candidates_core(results,v):
             elif km and abs(km-v.km)>40000:
                 reason=f"주행거리 범위 초과({km:,}km)"
             elif stype in ("unknown","reference"):
-                if strong_reference_ok(text, v, model_ok, pt_match, source_drive, source_trim):
+                if stype=="reference" and stale_reference(text):
+                    reason="오래된 시세자료"
+                elif strong_reference_ok(text, v, model_ok, pt_match, source_drive, source_trim):
                     stype="strong_reference"
                 elif stype=="unknown":
                     reason="개별매물 근거 부족"
@@ -678,16 +720,24 @@ def robust_market(cands):
 
     # 실제 개별매물을 최우선으로 사용.
     # 3건 미만일 때만 강한 참고자료를 최대 3건까지 보조로 사용한다.
+    if len(listing)==0:
+        return {
+            "status":"hold","count":0,"listing_count":0,
+            "strong_reference_count":len(strong_ref),"reference_count":len(reference),
+            "exact_meta_count":0,"confidence":"산정 보류","error_pct":None,
+            "provisional":True,"fallback_used":False,"dispersion":"-","spread_pct":None,
+            "confidence_reasons":["실제 개별매물 0건"],"median":None,"low":None,"high":None,
+            "prices":[],"adopted":[],"references":strong_ref[:10]+reference[:10],
+            "outliers":[],"reference_prices":[c.get("price") for c in strong_ref if c.get("price")]
+        }
+
     market_pool=list(listing)
     fallback_used=False
     if len(market_pool)<3 and strong_ref:
         fallback_used=True
         need=max(0,3-len(market_pool))
         strong_ref=sorted(strong_ref,key=lambda c:-c["score"])
-        market_pool += strong_ref[:min(3,need)]
-
-    if not market_pool:
-        return None
+        market_pool += strong_ref[:min(2,need)]
 
     enriched=[]
     for c in market_pool:
@@ -804,6 +854,7 @@ def robust_market(cands):
         ref_preview.append(cc)
 
     return {
+        "status":"confirmed" if lc>=3 and exact_listing_meta>=3 and strong_ref_count==0 else "provisional",
         "count":len(filtered),
         "listing_count":lc,
         "strong_reference_count":strong_ref_count,
@@ -956,6 +1007,18 @@ def analyze(v: Vehicle):
                     })
 
         market=robust_market(accepted)
+
+        if market and market.get("status")=="hold":
+            rp=market.get("reference_prices") or []
+            ref=None
+            if rp:
+                ref={"low":min(rp),"high":max(rp),"median":round(statistics.median(rp))}
+            return {
+                "ok":True,"status":"hold",
+                "message":"실제 개별매물 0건이라 공매가 산정을 보류했어. 참고자료만으로 추천 입찰가를 만들지는 않아.",
+                "market":market,"reference_market":ref,
+                "rejected":rejected[:60],"search_errors":errors
+            }
 
         if not market:
             return JSONResponse({
