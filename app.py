@@ -1,1144 +1,260 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+import os,re,statistics,requests
+from urllib.parse import urlparse
+from fastapi import FastAPI,Request
+from fastapi.responses import HTMLResponse,JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
-from html import unescape
-from urllib.parse import urlparse
-import os, re, statistics, requests, traceback
 
-app = FastAPI(title="공매가 AI 9.0.1")
-templates = Jinja2Templates(directory="templates")
-
-SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
-BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")
-SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
-
-
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(request: Request, exc: Exception):
-    return JSONResponse(
-        status_code=500,
-        content={
-            "ok": False,
-            "message": f"서버 처리 오류: {type(exc).__name__}: {str(exc)}",
-            "error_type": type(exc).__name__,
-        },
-    )
+app=FastAPI(title="공매가 AI 9.1")
+templates=Jinja2Templates(directory="templates")
 
 class Vehicle(BaseModel):
-    car: str
-    year: int
-    km: int
-    accident_count: int = 0
-    accident_amount: float = 0
-    parts_amount: float = 0
-    uninsured: int = 0
-    use_history: float = 0
-    frame: int = 0
-    condition: int = 0
-    liquidity: int = 0
-    special: int = 0
-    manual_prices: Optional[List[float]] = None
+    car:str
+    year:int
+    km:int
+    accident_count:int=0
+    accident_amount:float=0
+    parts_amount:float=0
+    uninsured:str="없음"
+    usage:str="일반"
+    frame_damage:str="없음"
+    condition:str="양호"
+    marketability:str="보통"
+    special_body:str="아님"
+    manual_prices:str=""
 
-def clean_text(s) -> str:
-    if s is None:
-        return ""
-    if not isinstance(s, str):
-        try:
-            s = str(s)
-        except Exception:
-            return ""
-    s = unescape(s)
-    s = re.sub(r"<[^>]+>", " ", s)
-    s = re.sub(r"\s+", " ", s)
-    return s.strip()
-
-def domain_of(url) -> str:
-    try:
-        if not isinstance(url, str):
-            url = "" if url is None else str(url)
-        return urlparse(url).netloc.lower().replace("www.", "")
-    except Exception:
-        return ""
-
-def search_web(query: str) -> List[Dict[str, str]]:
-    results = []
-    if SEARCH_PROVIDER == "brave" and BRAVE_API_KEY:
-        r = requests.get(
-            "https://api.search.brave.com/res/v1/web/search",
-            headers={"Accept": "application/json", "X-Subscription-Token": BRAVE_API_KEY},
-            params={"q": query, "count": 20, "country": "kr", "search_lang": "ko"},
-            timeout=6,
-        )
-        r.raise_for_status()
-        for x in r.json().get("web", {}).get("results", []):
-            results.append({
-                "title": clean_text(x.get("title", "")),
-                "url": x.get("url", ""),
-                "description": clean_text(x.get("description", "")),
-                "query": query,
-            })
-    elif SEARCH_PROVIDER == "serpapi" and SERPAPI_KEY:
-        r = requests.get(
-            "https://serpapi.com/search.json",
-            params={"engine":"google","q":query,"hl":"ko","gl":"kr","api_key":SERPAPI_KEY,"num":20},
-            timeout=6,
-        )
-        r.raise_for_status()
-        for x in r.json().get("organic_results", []):
-            results.append({
-                "title": clean_text(x.get("title", "")),
-                "url": x.get("link", ""),
-                "description": clean_text(x.get("snippet", "")),
-                "query": query,
-            })
-    return results
-
-def dedupe_results(results):
-    seen, out = set(), []
-    for x in (results or []):
-        if not isinstance(x, dict):
-            continue
-        raw_url = x.get("url") or ""
-        if not isinstance(raw_url, str):
-            raw_url = str(raw_url)
-        url = raw_url.split("#")[0].rstrip("/")
-        title = clean_text(x.get("title", ""))
-        key = url or title
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        y = dict(x)
-        y["title"] = title
-        y["description"] = clean_text(x.get("description", ""))
-        y["url"] = url
-        y["domain"] = domain_of(url)
-        out.append(y)
-    return out
-
-
-# 8.5.2: 동일 모델명이라도 페이스리프트/상품성 변경 모델은 별도 비교군으로 취급.
-def facelift_family(text):
-    t=clean_text(text).lower()
-    if re.search(r"(디\s*올\s*뉴|the\s*all\s*new)",t): return "the_all_new"
-    if re.search(r"(더\s*뉴|the\s*new)",t): return "the_new"
-    if re.search(r"(올\s*뉴|all\s*new)",t): return "all_new"
-    return "base"
-
-def facelift_match(target_car,result_text):
-    tf=facelift_family(target_car)
-    rf=facelift_family(result_text)
-    # 기본형 입력에 '더 뉴/디 올 뉴/올 뉴' 검색결과가 섞이는 것을 차단.
-    if tf=="base" and rf!="base":
-        return False,"세대/페이스리프트 불일치"
-    # 입력에 상품명이 명시된 경우 다른 상품명은 차단.
-    if tf!="base" and rf!="base" and tf!=rf:
-        return False,"세대/페이스리프트 불일치"
-    # 검색 제목이 축약되어 상품명이 빠진 경우는 다른 조건으로 계속 검증.
-    return True,""
-
-def build_queries(v, stage=1):
-    car=(v.car or "").strip()
-    core=" ".join(core_model_tokens(car))
-    pt=powertrain_group(car)
-    ptword=pt[0] if pt else ""
-    fam=facelift_family(car)
-    famword={"the_all_new":"디 올 뉴","the_new":"더 뉴","all_new":"올 뉴"}.get(fam,"")
-    base=" ".join(x for x in [str(v.year),famword,core,ptword] if x).strip()
-    if stage==1:
-        return [
-            f'{base} {v.km}km 중고차 판매 매물',
-            f'{base} 중고차 판매가 주행거리',
-            f'site:encar.com {base} 중고차',
-            f'site:kbchachacha.com {base} 중고차',
-            f'site:kcar.com {base} 중고차',
-            f'site:reborncar.co.kr {base} 중고차',
-        ]
-    if stage==2:
-        return [
-            f'{base} 중고차 매물',
-            f'{v.year} {core} {ptword} 판매중 중고차',
-            f'{v.year-1} {core} {ptword} 중고차 매물',
-            f'{v.year+1} {core} {ptword} 중고차 매물',
-            f'{core} {ptword} 최초등록 주행거리 판매가',
-        ]
-    return [
-        f'{base} 중고차 가격',
-        f'{core} {ptword} 중고차 시세',
-        f'{core} {ptword} 중고 가격 판매가',
-    ]
-
-def relaxed_car_names(v):
-    raw = re.sub(r"\s+", " ", v.car.strip())
-    tokens = raw.split()
-
-    trim_words = {
-        "프리미엄","플러스","프리미엄플러스","인스퍼레이션","캘리그래피",
-        "시그니처","노블레스","프레스티지","익스클루시브","스마트",
-        "모던","럭셔리","스포츠","그래비티","블랙잉크","에어",
-        "익스페디션","슈프림","엘리트","리미티드","플래티넘",
-        "RE","LE","SE","SEL","H-픽","H픽"
-    }
-
-    power_words = {
-        "하이브리드","HEV","EV","전기","디젤","LPG","엘피지",
-        "가솔린","휘발유","PHEV","플러그인하이브리드"
-    }
-
-    names = [raw]
-
-    stripped = [t for t in tokens if t not in trim_words]
-    if stripped:
-        s = " ".join(stripped)
-        if s not in names:
-            names.append(s)
-
-    power = [t for t in stripped if t in power_words]
-    base = [t for t in stripped if t not in power_words]
-
-    if base:
-        model = " ".join(base[:2])
-        if power:
-            s = (model + " " + " ".join(power)).strip()
-            if s not in names:
-                names.append(s)
-        if model not in names:
-            names.append(model)
-
-    if tokens and tokens[0] not in names:
-        names.append(tokens[0])
-
-    return names[:4]
-
-def build_relaxed_queries(v, car_name, stage=2):
-    target = max(1, round(v.km / 10000))
-    years = (v.year-1, v.year, v.year+1)
-
-    qs = []
-    if stage == 2:
-        for y in years:
-            qs += [
-                f'{y} "{car_name}" {target}만km 중고차 판매',
-                f'{y} "{car_name}" 중고차 매물 가격',
-            ]
-        qs += [
-            f'site:encar.com "{car_name}" {v.year} 중고차',
-            f'site:kbchachacha.com "{car_name}" {v.year} 중고차',
-            f'site:kcar.com "{car_name}" {v.year} 중고차',
-        ]
-    else:
-        for y in years:
-            qs += [
-                f'{car_name} {y} 중고차 {target}만km 판매가',
-                f'{car_name} {y} 중고차 실매물',
-                f'{car_name} {y} 중고차 가격 {target}만km',
-            ]
-        qs += [
-            f'"{car_name}" 중고차 판매 매물',
-            f'"{car_name}" 중고차 실매물 가격',
-        ]
-
-    seen, out = set(), []
-    for q in qs:
-        if q not in seen:
-            seen.add(q)
-            out.append(q)
-    return out
-
-def car_keywords(car):
-    raw = re.findall(r"[가-힣A-Za-z0-9]+", (car or "").lower())
-    stop = {"가솔린","휘발유","디젤","경유","하이브리드","hev","lpg","lpi","전기","ev",
-            "2wd","4wd","awd","2륜","4륜","오토","자동","수동","터보",
-            "프리미엄","프레스티지","노블레스","시그니처","캘리그래피",
-            "인스퍼레이션","럭셔리","모던","스마트","스포츠","기본형","플러스","패키지","라인"}
-    return [t for t in raw if t not in stop and not re.fullmatch(r"20\d{2}", t) and (len(t)>=2 or re.search(r"\d",t))][:8]
-
-def powertrain_group(car):
-    c=(car or "").lower().replace(" ","")
-    if "하이브리드" in c or "hev" in c: return ["하이브리드","hev"]
-    if "디젤" in c or "경유" in c: return ["디젤","경유"]
-    if "lpg" in c or "lpi" in c or "엘피지" in c: return ["lpg","lpi","엘피지"]
-    if "전기" in c or re.search(r"\bev\b", c): return ["전기","ev"]
-    if "가솔린" in c or "휘발유" in c: return ["가솔린","휘발유"]
-    return None
-
-TRIM_RANK = {
-    "스마트":1, "모던":2, "프레스티지":3, "프리미엄":3,
-    "노블레스":4, "익스클루시브":4, "럭셔리":4,
-    "시그니처":5, "인스퍼레이션":5, "스포츠":5,
-    "캘리그래피":6, "그래비티":6, "플래티넘":6,
-    "익스페디션":6, "블랙잉크":6
-}
-
-def detect_drive(text):
-    t=(text or "").lower().replace(" ","")
-    if any(x in t for x in ["4wd","awd","4륜","사륜"]):
-        return "4WD"
-    if any(x in t for x in ["2wd","2륜"]):
-        return "2WD"
-    return None
-
-def detect_engine(text):
-    t=(text or "").lower()
-    m=re.search(r"(?<!\d)([1-6]\.\d)\s*(?:t|터보|l|리터)?", t)
-    return m.group(1) if m else None
-
-def detect_trim(text):
-    t=(text or "")
-    found=[]
-    for name,rank in TRIM_RANK.items():
-        if name.lower() in t.lower():
-            found.append((rank,name))
-    if not found:
-        return None
-    return sorted(found, reverse=True)[0][1]
-
-def core_model_tokens(car):
-    raw=re.findall(r"[가-힣A-Za-z0-9]+",(car or "").lower())
-    stop={
-        "가솔린","휘발유","디젤","경유","하이브리드","hev","lpg","lpi","엘피지",
-        "전기","ev","phev","2wd","4wd","awd","2륜","4륜","오토","자동","수동",
-        "터보","프리미엄","플러스","프레스티지","노블레스","시그니처",
-        "캘리그래피","인스퍼레이션","럭셔리","모던","스마트","스포츠",
-        "그래비티","플래티넘","익스페디션","블랙잉크","기본형","패키지","라인"
-    }
+def clean(s): return re.sub(r"\s+"," ",str(s or "")).strip()
+def domain(u):
+    try:return urlparse(u).netloc.replace("www.","")
+    except:return ""
+def prices(text):
+    t=clean(text).replace(",","")
     out=[]
-    for t in raw:
-        if t in stop or re.fullmatch(r"\d+(?:\.\d+)?",t) or re.fullmatch(r"20\d{2}",t):
-            continue
-        if len(t)>=2:
-            out.append(t)
-    return out[:3]
+    for m in re.finditer(r"(?<!\d)(\d{3,5})\s*만\s*원?",t):
+        n=int(m.group(1))
+        if 200<=n<=20000: out.append(n)
+    # 원 단위 표기
+    for m in re.finditer(r"(?<!\d)(\d{7,9})\s*원",t):
+        n=round(int(m.group(1))/10000)
+        if 200<=n<=20000: out.append(n)
+    return list(dict.fromkeys(out))
 
-def trim_adjustment_pct(target_trim, source_trim):
-    # 트림 서열은 차종마다 다를 수 있으므로 보정폭을 작게 제한한다.
-    if not target_trim or not source_trim or target_trim==source_trim:
-        return 0.0
-    tr=TRIM_RANK.get(target_trim)
-    sr=TRIM_RANK.get(source_trim)
-    if tr is None or sr is None:
-        return 0.0
-    return max(-0.03,min(0.03,(tr-sr)*0.015))
-
-def drive_adjustment_pct(target_drive, source_drive):
-    # 목표가 4WD인데 비교매물이 2WD면 목표차 가격으로 +3%, 반대는 -3%.
-    if not target_drive or not source_drive or target_drive==source_drive:
-        return 0.0
-    if target_drive=="4WD" and source_drive=="2WD":
-        return 0.03
-    if target_drive=="2WD" and source_drive=="4WD":
-        return -0.03
-    return 0.0
-
-def _normalize_2digit_year(y2: int, target_year: int):
-    # 중고차 검색에서 17년식, 21년형처럼 2자리 연식 표기가 흔함
-    candidates=[1900+y2, 2000+y2]
-    return min(candidates, key=lambda y: abs(y-target_year))
-
-def nearest_year(text,pos,target_year):
-    """
-    차량 연식만 최대한 추출한다.
-    게시일/시세기준일은 차량 연식으로 사용하지 않는다.
-    """
-    s=(text or "").lower()
-
-    strong_patterns = [
-        r"(20\d{2})\s*년\s*식",
-        r"(20\d{2})\s*년\s*형",
-        r"(20\d{2})\s*모델",
-        r"최초\s*등록\s*[:：]?\s*(20\d{2})",
-        r"등록\s*연도\s*[:：]?\s*(20\d{2})",
-        r"연식\s*[:：]?\s*(20\d{2})",
-        r"차량\s*연식\s*[:：]?\s*(20\d{2})",
-        r"(?<!\d)(\d{2})\s*년\s*식",
-        r"(?<!\d)(\d{2})\s*년\s*형",
-    ]
-
-    found=[]
-    for pat in strong_patterns:
-        for m in re.finditer(pat,s):
-            raw=m.group(1)
-            y=int(raw)
-            if y<100:
-                y=2000+y
-            if 2000<=y<=2035:
-                found.append((abs(m.start()-pos),y,0))
-
-    for m in re.finditer(r"(?<!\d)(20\d{2})(?!\d)", s):
-        y=int(m.group(1))
-        around=s[max(0,m.start()-18):min(len(s),m.end()+22)]
-
-        dateish = (
-            re.search(rf"{y}\s*년\s*\d{{1,2}}\s*월", around) is not None
-            or "기준" in around
-            or "작성" in around
-            or "게시" in around
-            or "업데이트" in around
-            or "시세표" in around
-            or "기사" in around
-        )
-        vehicleish = any(k in around for k in [
-            "연식","년식","년형","최초등록","등록연도","차량정보","매물정보","모델연도"
-        ])
-        if dateish and not vehicleish:
-            continue
-
-        found.append((abs(m.start()-pos),y,1))
-
-    if not found:
-        return None
-
-    found.sort(key=lambda x:(x[2],x[0],abs(x[1]-target_year)))
-    return found[0][1]
-
-def mileage_values(text):
+def years(text):
+    now=2027
     vals=[]
-    # 104,377km / 40,000 km
-    for m in re.finditer(r"(?<!\d)(\d{1,3}(?:,\d{3})+)\s*(?:km|㎞|키로)", text, re.I):
-        try:
-            vals.append(int(m.group(1).replace(",","")))
-        except (TypeError, ValueError):
-            pass
+    for x in re.findall(r"(?<!\d)(20\d{2})\s*년?(?:식|형)?",clean(text)):
+        y=int(x)
+        if 2000<=y<=now: vals.append(y)
+    return vals
 
-    # 4만km / 10.6만 km
-    for m in re.finditer(r"(?<!\d)(\d{1,3}(?:\.\d+)?)\s*만\s*(?:km|㎞|키로)", text, re.I):
-        try:
-            vals.append(int(float(m.group(1))*10000))
-        except (TypeError, ValueError):
-            pass
+def mileages(text):
+    t=clean(text).replace(",","")
+    vals=[]
+    for m in re.finditer(r"(?<!\d)(\d{1,6})\s*km",t,re.I):
+        n=int(m.group(1))
+        if 100<=n<=500000: vals.append(n)
+    for m in re.finditer(r"주행(?:거리)?\s*[:\-]?\s*(\d{1,6})",t):
+        n=int(m.group(1))
+        if 100<=n<=500000: vals.append(n)
+    return vals
 
-    # 40000km 처럼 쉼표 없는 4~6자리 표기
-    for m in re.finditer(r"(?<![\d,])(\d{4,6})\s*(?:km|㎞|키로)", text, re.I):
-        try:
-            val=int(m.group(1))
-            if 1000 <= val <= 500000:
-                vals.append(val)
-        except (TypeError, ValueError):
-            pass
+def power(text):
+    t=clean(text).lower()
+    if "하이브리드" in t or "hev" in t:return "HEV"
+    if "디젤" in t:return "DIESEL"
+    if "lpg" in t or "lpi" in t:return "LPG"
+    if "전기" in t or re.search(r"\bev\b",t):return "EV"
+    if "가솔린" in t or "휘발유" in t:return "GAS"
+    return ""
 
-    # 중복 제거
-    return sorted(set(vals))
+def facelift(text):
+    t=clean(text).lower()
+    if "더 뉴" in t:return "더뉴"
+    if "디 올 뉴" in t:return "디올뉴"
+    if "올 뉴" in t:return "올뉴"
+    return ""
 
-def nearest_mileage(text,target):
-    vals=mileage_values(text)
-    return min(vals,key=lambda x:abs(x-target)) if vals else None
+def drive(text):
+    t=clean(text).upper().replace(" ","")
+    if re.search(r"4WD|AWD|4륜|사륜|XDRIVE|4MATIC|QUATTRO",t):return "4WD"
+    if re.search(r"2WD|2륜|FWD|RWD|전륜|후륜",t):return "2WD"
+    return ""
 
-def price_floor(year):
-    if year>=2025: return 900
-    if year>=2022: return 650
-    if year>=2019: return 450
-    if year>=2015: return 280
-    return 150
+TRIMS=["시그니처 그래비티","그래비티","캘리그래피","인스퍼레이션","시그니처","노블레스",
+       "프레스티지","프리미엄 초이스","프리미엄","모던 플러스","모던","익스클루시브","럭셔리","스포츠","에어","어스"]
+def trim(text):
+    z=clean(text).replace(" ","").lower()
+    for x in TRIMS:
+        if x.replace(" ","").lower() in z:return x
+    return ""
 
-def is_specific_listing_url(url: str, domain: str) -> bool:
-    u=(url or "").lower()
-    d=(domain or "").lower()
+def list_page(text):
+    t=clean(text)
+    return bool(re.search(r"시세표|가격표|중고차\s*\d+\s*대|전체\s*매물|검색\s*결과",t,re.I))
 
-    # 플랫폼의 실제 차량 상세주소에서 자주 쓰는 패턴들
-    detail_patterns={
-        "encar.com":["cardetail", "carid=", "/cars/detail", "/detail/"],
-        "kbchachacha.com":["carseq=", "/public/car/detail", "/car/detail", "detail.kbc"],
-        "kcar.com":["carinfodtl", "scarcd=", "/car/detail", "/detail/"],
-        "bobaedream.co.kr":["mycar_view", "no=", "/cyber/cview"],
-        "autowini.com":["vehicle/", "/detail/"],
-    }
-    for host,pats in detail_patterns.items():
-        if host in d and any(p in u for p in pats):
-            return True
-    return False
-
-def source_type(text, domain, url="", year=None, km=None):
-    guide_terms=["시세표","가격표","구매 가이드","구매가이드","가격 시세","연식별","중고 시세","시세 조회",
-                 "가격 조회","총정리","비교","전망","평균","모델별","국내 매물 대수","중고차 플랫폼",
-                 "검색결과","검색 결과","차량검색","매물검색","홈페이지"]
-    listing_terms=["주행거리","km","차량번호","판매중","판매가","차량가","성능점검","최초등록","연식"]
-
-    if any(g in text for g in guide_terms):
-        return "reference"
-
-    # URL 자체가 실제 차량 상세페이지면 가장 강한 근거
-    if is_specific_listing_url(url,domain):
-        return "listing"
-
-    # 플랫폼 도메인이라는 이유만으로 개별매물 처리하지 않음.
-    # 연식·주행거리 등 실제 차량 메타정보가 같이 있어야 개별매물로 인정.
-    evidence=sum(1 for x in listing_terms if x in text)
-    if year is not None: evidence+=2
-    if km is not None: evidence+=2
-    if evidence>=5 and (year is not None or km is not None):
-        return "listing"
-
-    if evidence>=2:
-        return "reference"
-    return "unknown"
-
-
-def extract_reference_year(text):
-    t=(text or "").lower()
-    pats=[
-        r"(20\d{2})\s*년\s*\d{1,2}\s*월\s*(?:기준|작성|게시)?",
-        r"(?<!\d)(\d{2})\s*년\s*\d{1,2}\s*월\s*기준",
-        r"(20\d{2})\s*년\s*기준",
-        r"(?<!\d)(\d{2})\s*년\s*기준",
+def queries(v):
+    c=clean(v.car)
+    return [
+      f'{v.year} {c} {v.km//10000}만km 중고차 가격',
+      f'{v.year} {c} 중고차 {v.km}km',
+      f'site:car.encar.com {v.year} {c}',
+      f'site:kbchachacha.com {v.year} {c}',
+      f'site:kcar.com {v.year} {c}',
+      f'{v.year} {c} 인증중고차'
     ]
-    ys=[]
-    for pat in pats:
-        for m in re.finditer(pat,t):
-            y=int(m.group(1))
-            if y<100: y+=2000
-            if 2000<=y<=2035: ys.append(y)
-    return max(ys) if ys else None
 
-def stale_reference(text):
-    y=extract_reference_year(text)
-    return bool(y and y < 2024)
+def brave(q):
+    key=os.getenv("BRAVE_API_KEY","")
+    if not key:return [],"BRAVE_API_KEY가 설정되지 않았어."
+    try:
+        r=requests.get("https://api.search.brave.com/res/v1/web/search",
+            headers={"Accept":"application/json","X-Subscription-Token":key},
+            params={"q":q,"count":10,"country":"KR","search_lang":"ko"},timeout=12)
+        r.raise_for_status()
+        rows=[]
+        for x in r.json().get("web",{}).get("results",[]):
+            rows.append({"title":clean(x.get("title")),"snippet":clean(x.get("description")),
+                         "url":x.get("url",""),"source":domain(x.get("url",""))})
+        return rows,""
+    except Exception as e:return [],f"{type(e).__name__}: {e}"
 
-def is_guide_or_price_article(text, domain):
-    t=(text or "").lower()
-    d=(domain or "").lower()
-    guide_words=["시세표","시세 총정리","중고차가이드","가격 가이드","가격표","중고차 시세"]
-    return any(w in t for w in guide_words) or any(x in d for x in ["carinfo","guide","blog"])
-
-def strong_reference_ok(text, v, model_ok, pt_match, source_drive, source_trim):
-    """
-    실제 상세매물은 아니지만 차종/동력원/구동/트림/가격이 구체적인
-    가격 가이드 자료는 '강한 참고자료'로 보관한다.
-    최종 시세 계산에는 실제 매물이 부족할 때만 보조적으로 사용한다.
-    """
-    if not model_ok or not pt_match:
-        return False
-    if stale_reference(text):
-        return False
-    t=(text or "").lower()
-
-    # 너무 일반적인 시세표는 제외
-    if any(x in t for x in ["구형 하이브리드","시세 총정리","국내 매물 대수 1위"]):
-        return False
-
-    # 최소 하나 이상의 세부 사양이 확인되어야 함
-    detail = 0
-    if source_drive: detail += 1
-    if source_trim: detail += 1
-    if detect_engine(text): detail += 1
-
-    return detail >= 1 and any(x in t for x in ["중고 가격","판매가","중고차 가격","만원"])
-
-
-
-def drive_group(text):
-    t=clean_text(text).upper().replace(" ","")
-    if re.search(r"(4WD|AWD|4륜|사륜|XDRIVE|4MATIC|QUATTRO)",t): return "4WD"
-    if re.search(r"(2WD|2륜|전륜|후륜|FWD|RWD)",t): return "2WD"
+def hard_reject(v,text):
+    if list_page(text):return "목록/시세 페이지"
+    tp,rp=power(v.car),power(text)
+    if tp and rp and tp!=rp:return "동력원 불일치"
+    tf,rf=facelift(v.car),facelift(text)
+    if tf and rf and tf!=rf:return "세대/페이스리프트 불일치"
+    if not tf and rf:return "세대/페이스리프트 불일치"
     return ""
 
-def trim_group(text):
-    t=clean_text(text).replace(" ","").lower()
-    trims=["시그니처 그래비티","그래비티","캘리그래피","인스퍼레이션","시그니처",
-           "노블레스","프레스티지","프리미엄 초이스","프리미엄","모던 플러스",
-           "모던","익스클루시브","럭셔리","스포츠","에어","어스"]
-    for x in trims:
-        if x.replace(" ","").lower() in t: return x
-    return ""
+def score(v,text,y,km):
+    sc=20 # 검색 쿼리 자체가 모델명을 포함하므로 기본 모델 관련성
+    tp,rp=power(v.car),power(text)
+    if tp and rp==tp:sc+=15
+    elif tp and not rp:sc+=5
+    if y:
+        d=abs(y-v.year); sc+=20 if d==0 else 12 if d==1 else 5 if d==2 else 0
+    if km is not None:
+        d=abs(km-v.km); sc+=20 if d<=10000 else 15 if d<=20000 else 10 if d<=30000 else 5 if d<=50000 else 0
+    td,rd=drive(v.car),drive(text)
+    if td and rd:sc+=8 if td==rd else 3
+    tt,rt=trim(v.car),trim(text)
+    if tt and rt:sc+=12 if tt==rt else 4
+    elif tt and not rt:sc+=2
+    return min(100,sc)
 
-def similarity_v90(v, title, snippet, year, mileage, drive, trim):
-    text=clean_text(f"{title} {snippet}")
-    score=0
-    detail=[]
+def adjust(v,p,y,km,text):
+    x=float(p); notes=[]
+    if y:
+        dy=v.year-y
+        if dy: x*=1+(0.035*dy); notes.append(f"연식 {dy:+d}년")
+    if km is not None:
+        dk=v.km-km
+        pct=max(-0.10,min(0.10,-dk/100000*0.10))
+        if abs(pct)>.001:x*=1+pct;notes.append(f"주행거리 {pct*100:+.1f}%")
+    td,rd=drive(v.car),drive(text)
+    if td and rd and td!=rd:
+        pct=.03 if td=="4WD" else -.03
+        x*=1+pct;notes.append(f"구동 {pct*100:+.1f}%")
+    return round(x),", ".join(notes) or "보정 없음"
 
-    # 모델은 후보 추출 단계에서 기본 검증됨. 여기서는 핵심 토큰 일치도를 가점.
-    core=[x.lower() for x in core_model_tokens(v.car) if len(x)>=2]
-    hit=sum(1 for x in core if x in text.lower())
-    if core:
-        model_pts=25*(hit/len(core))
-        score+=model_pts; detail.append(("모델",round(model_pts,1)))
+def risk_discount(v):
+    d=.155
+    d+=min(.06,v.accident_count*.008)
+    d+=min(.05,v.accident_amount/10000*.03)
+    d+=min(.03,v.parts_amount/10000*.02)
+    if "있" in v.uninsured:d+=.015
+    if v.usage!="일반":d+=.025
+    if "있" in v.frame_damage:d+=.06
+    if v.condition not in ("양호","좋음"):d+=.02
+    if v.marketability=="낮음":d+=.025
+    elif v.marketability=="높음":d-=.01
+    if v.special_body!="아님":d+=.02
+    return max(.10,min(.35,d))
 
-    # 동력원
-    tp=powertrain_group(v.car); rp=powertrain_group(text)
-    if tp and rp and tp[0]==rp[0]:
-        score+=15; detail.append(("동력원",15))
-    elif tp and not rp:
-        score+=7; detail.append(("동력원미확인",7))
+@app.get("/",response_class=HTMLResponse)
+def home(request:Request):return templates.TemplateResponse("index.html",{"request":request})
 
-    # 연식
-    if year:
-        dy=abs(year-v.year)
-        pts=max(0,20-dy*10)
-        score+=pts; detail.append(("연식",pts))
+@app.post("/analyze")
+def analyze(v:Vehicle):
+    raw=[]; errors=[]
+    for q in queries(v):
+        rows,err=brave(q)
+        if err:errors.append(err)
+        raw.extend(rows)
+        if len(raw)>=25:break
 
-    # 주행거리
-    if mileage is not None:
-        dk=abs(mileage-v.km)
-        pts=max(0,20-(dk/10000)*4)
-        score+=pts; detail.append(("주행거리",round(pts,1)))
+    # dedupe raw
+    seen=set(); unique=[]
+    for r in raw:
+        k=((r["url"] or "").split("?")[0].rstrip("/"),r["title"])
+        if k in seen:continue
+        seen.add(k);unique.append(r)
+    raw=unique
 
-    # 구동
-    td=drive_group(v.car); rd=drive or drive_group(text)
-    if td and rd:
-        pts=5 if td==rd else 2
-        score+=pts; detail.append(("구동",pts))
+    extracted=[]; rejected=[]
+    for r in raw:
+        text=clean(r["title"]+" "+r["snippet"])
+        ps=prices(text)
+        ys=years(text); kms=mileages(text)
+        if not ps:continue
+        reason=hard_reject(v,text)
+        for p in ps[:2]:
+            row={**r,"price":p,"year":ys[0] if ys else None,"mileage":kms[0] if kms else None}
+            if reason:
+                row["reason"]=reason;rejected.append(row);continue
+            row["score"]=score(v,text,row["year"],row["mileage"])
+            if row["score"]<42:
+                row["reason"]=f"유사도 낮음({row['score']}점)";rejected.append(row);continue
+            row["adjusted_price"],row["adjustment"]=adjust(v,p,row["year"],row["mileage"],text)
+            extracted.append(row)
 
-    # 트림
-    tt=trim_group(v.car); rt=trim or trim_group(text)
-    if tt and rt:
-        pts=10 if tt==rt else 4
-        score+=pts; detail.append(("트림",pts))
-    elif tt and not rt:
-        score+=2; detail.append(("트림미확인",2))
+    # manual prices are always explicit user comparables
+    for x in re.findall(r"\d{3,5}",v.manual_prices.replace(",","")):
+        p=int(x)
+        if 200<=p<=20000:
+            extracted.append({"title":"수동 비교매물","snippet":"","url":"","source":"manual",
+             "price":p,"year":v.year,"mileage":v.km,"score":100,"adjusted_price":p,"adjustment":"수동 입력"})
 
-    return round(min(100,score),1), detail
+    # dedupe calculation rows
+    seen=set(); adopted=[]
+    for x in sorted(extracted,key=lambda z:-z["score"]):
+        k=(x.get("url"),x["price"])
+        if k in seen:continue
+        seen.add(k);adopted.append(x)
+    adopted=adopted[:8]
 
-def hard_reject_v90(v, title, snippet, url):
-    """9.0은 명백한 오류만 강제 제외한다."""
-    text=clean_text(f"{title} {snippet}")
-    if re.search(r"(시세표|가격표|전체매물|중고차\s*\d+\s*대|검색결과)",text):
-        return "목록/시세자료"
-    tp=powertrain_group(v.car); rp=powertrain_group(text)
-    if tp and rp and tp[0]!=rp[0]:
-        return "동력원 불일치"
-    tf=facelift_family(v.car); rf=facelift_family(text)
-    if tf and rf and tf!=rf:
-        return "세대/페이스리프트 불일치"
-    if (not tf) and rf:
-        return "세대/페이스리프트 불일치"
-    return ""
-
-def weighted_mean_v90(items):
-    if not items: return None
-    sw=sum(max(1,float(x.get("weight",1))) for x in items)
-    return sum(float(x["adjusted_price"])*max(1,float(x.get("weight",1))) for x in items)/sw
-
-def _extract_candidates_core(results,v):
-    accepted=[]; rejected=[]
-    patt=re.compile(r"(?<![\d,])(\d{1,3}(?:,\d{3})+|\d{3,5})\s*만\s*원")
-    kws=car_keywords(v.car)
-    core=core_model_tokens(v.car)
-    pt=powertrain_group(v.car)
-    floor=price_floor(v.year)
-
-    target_drive=detect_drive(v.car)
-    target_engine=detect_engine(v.car)
-    target_trim=detect_trim(v.car)
-
-    bad=["월납","월 납","월렌트","월 렌트","월리스","월 리스","보증금","선수금","지원금","취등록","보험료",
-         "수리비","부품비","사고비","계약금","할인","혜택","캐시백","리스료","렌트료"]
-
-    for idx,x in enumerate(results):
-        title=clean_text(x.get("title",""))
-        desc=clean_text(x.get("description",""))
-        domain=x.get("domain","")
-        url=x.get("url","")
-        text=f"{title} {desc}".lower()
-
-        km=nearest_mileage(text,v.km)
-        kw_hits=sum(1 for k in kws if k in text)
-        core_hits=sum(1 for k in core if k in text)
-        pt_match=True if not pt else any(term in text for term in pt)
-
-        source_drive=detect_drive(text)
-        source_engine=detect_engine(text)
-        source_trim=detect_trim(text)
-
-        # 8.4차: 모델명 자체가 확인되면 세부 트림/구동방식 차이로 탈락시키지 않는다.
-        model_ok=(core_hits>=1) if core else (kw_hits>=1 if kws else True)
-        per_url=[]
-
-        for m in patt.finditer(text):
-            price=int(m.group(1).replace(",",""))
-            start,end=m.span()
-            context=text[max(0,start-140):min(len(text),end+140)]
-            yr=nearest_year(text,start,v.year)
-            stype=source_type(text,domain,url,yr,km)
-            reason=None
-
-            if price<floor:
-                reason=f"가격 하한({floor}만원) 미만"
-            elif price>30000:
-                reason="비현실적 고가"
-            elif any(term in context for term in bad):
-                reason="월납/보증금/할인·비용성 금액"
-            elif not model_ok:
-                reason="차종 유사도 부족"
-            elif pt and not pt_match:
-                reason="동력원 불일치"
-            elif not facelift_match(v.car,text)[0]:
-                reason=facelift_match(v.car,text)[1]
-            elif yr and abs(yr-v.year)>1:
-                reason=f"연식 범위 초과({yr})"
-            elif km and abs(km-v.km)>40000:
-                reason=f"주행거리 범위 초과({km:,}km)"
-            elif stype in ("unknown","reference"):
-                if stype=="reference" and stale_reference(text):
-                    reason="오래된 시세자료"
-                elif strong_reference_ok(text, v, model_ok, pt_match, source_drive, source_trim):
-                    stype="strong_reference"
-                elif stype=="unknown":
-                    reason="개별매물 근거 부족"
-
-            score=min(core_hits,3)*4 + min(kw_hits,4)
-            if stype=="listing":
-                score += 7
-            elif stype=="strong_reference":
-                score += 2
-            elif stype=="reference":
-                score -= 4
-            else:
-                score -= 2
-            score += 8 if yr==v.year else (5 if yr and abs(yr-v.year)==1 else (-3 if yr is None else -6))
-            if pt and pt_match:
-                score+=4
-
-            if km:
-                diff=abs(km-v.km)
-                score += 7 if diff<=10000 else (5 if diff<=20000 else (2 if diff<=40000 else -6))
-            else:
-                score -= 3
-
-            if yr is not None and km is not None:
-                score += 5
-            if is_specific_listing_url(url,domain):
-                score += 6
-
-            # 8.4.1차: 실제 상세매물 + 핵심 모델/동력원 일치 시 강하게 가산
-            if stype=="listing" and model_ok and pt_match:
-                score += 5
-            elif stype=="strong_reference" and model_ok and pt_match:
-                score += 4
-                if source_drive:
-                    score += 2
-                if source_trim:
-                    score += 2
-            if any(term in context for term in ["판매가","차량가","판매중"]):
-                score+=2
-
-            # 구동/배기량/트림은 탈락 조건이 아니라 유사도와 가격보정 요소.
-            if target_drive and source_drive:
-                score += 2 if target_drive==source_drive else 0
-            if target_engine and source_engine:
-                score += 2 if target_engine==source_engine else -1
-            if target_trim and source_trim:
-                score += 2 if target_trim==source_trim else 0
-
-            drive_adj=drive_adjustment_pct(target_drive,source_drive)
-            trim_adj=trim_adjustment_pct(target_trim,source_trim)
-
-            rec={
-                "price":price,"year":yr,"score":score,"mileage":km,"title":title,"url":url,
-                "domain":domain,"reason":reason or "채택","source_type":stype,
-                "target_year":v.year,"target_km":v.km,
-                "target_drive":target_drive,"source_drive":source_drive,
-                "target_engine":target_engine,"source_engine":source_engine,
-                "target_trim":target_trim,"source_trim":source_trim,
-                "drive_adjust_pct":drive_adj,"trim_adjust_pct":trim_adj,
-                "core_model_match":model_ok,
-                "powertrain_match":pt_match,
-                "target_family":facelift_family(v.car),
-                "source_family":facelift_family(text)
-            }
-
-            if reason is None:
-                per_url.append(rec)
-            else:
-                rejected.append(rec)
-
-        if per_url:
-            best=sorted(
-                per_url,
-                key=lambda c:(-c["score"],
-                              99 if c["year"] is None else abs(c["year"]-v.year),
-                              999999 if c["mileage"] is None else abs(c["mileage"]-v.km))
-            )[0]
-
-            # 실제 개별매물은 기준을 약간 완화하되 참고자료는 계속 엄격하게 유지.
-            if best["source_type"]=="listing":
-                min_score=10
-            elif best["source_type"]=="strong_reference":
-                min_score=10
-            else:
-                min_score=17
-            if best["score"]>=min_score:
-                accepted.append(best)
-                for extra in per_url[1:]:
-                    extra=dict(extra)
-                    extra["reason"]="동일 URL의 보조 가격"
-                    rejected.append(extra)
-            else:
-                best=dict(best)
-                best["reason"]="유사도 점수 부족"
-                rejected.append(best)
-
-    return accepted,rejected
-
-def extract_candidates(results,v):
-    accepted=[]
-    rejected=[]
-    for item in (results or []):
-        try:
-            a,r=_extract_candidates_core([item],v)
-            accepted.extend(a)
-            rejected.extend(r)
-        except Exception as e:
-            title=""
-            url=""
-            if isinstance(item,dict):
-                title=clean_text(item.get("title",""))
-                url=clean_text(item.get("url",""))
-            rejected.append({
-                "price":0,
-                "year":None,
-                "score":0,
-                "mileage":None,
-                "title":title or "검색결과 처리 오류",
-                "url":url,
-                "domain":domain_of(url),
-                "reason":f"검색결과 처리 오류({type(e).__name__})",
-                "source_type":"unknown",
-                "target_year":v.year,
-                "target_km":v.km
-            })
-    return accepted,rejected
-
-def normalize_year(price,source_year,target_year):
-    if not source_year or source_year==target_year:
-        return float(price)
-    diff=source_year-target_year
-    return price*(0.95**diff) if diff>0 else price*(1.05**(-diff))
-
-def adjust_km(price,source_km,target_km):
-    if not source_km:
-        return price
-    diff=target_km-source_km
-    rate=max(-0.06,min(0.06,-(diff/10000)*0.01))
-    return price*(1+rate)
-
-def weighted_median(values):
-    arr=sorted(values,key=lambda x:x[0])
-    total=sum(w for _,w in arr)
-    acc=0
-    for value,weight in arr:
-        acc+=weight
-        if acc>=total/2:
-            return value
-    return arr[-1][0]
-
-def robust_market(cands):
-    raw=sorted([c for c in cands if c.get("source_type")=="listing"],
-               key=lambda c:-c.get("similarity_v90",c.get("score",0)))
-    refs=sorted([c for c in cands if c.get("source_type")=="strong_reference"],
-                key=lambda c:-c.get("score",0))
-
-    def enrich(c,ref=False):
-        x=dict(c)
-        p=float(x["price"])
-        p=normalize_year(p,x.get("year"),x.get("target_year"))
-        p=adjust_km(p,x.get("mileage"),x.get("target_km"))
-        p*=1+(x.get("drive_adjust_pct",0)/100)
-        p*=1+(x.get("trim_adjust_pct",0)/100)
-        x["adjusted_price"]=round(p)
-        x["calc_role"]="참고용·계산 제외" if ref else "유사도 가중 계산"
-        sim=float(x.get("similarity_v90",x.get("score",55)))
-        x["weight"]=max(0.15,min(1.0,(sim-45)/45))
-        return x
-
-    listing=[enrich(c) for c in raw]
-    strong=[enrich(c,True) for c in refs]
-
-    if not listing:
-        refvals=[x["adjusted_price"] for x in strong]
-        return {"status":"hold","count":0,"listing_count":0,
-                "references":strong,"strong_reference_count":len(strong),
-                "reference_low":min(refvals) if refvals else None,
-                "reference_high":max(refvals) if refvals else None,
-                "reference_median":round(statistics.median(refvals)) if refvals else None,
-                "confidence":"산정 보류","error_pct":None,
-                "reasons":["계산 가능한 비교매물 0건"]}
-
-    # 4건 이상이면 극단치 1차 제거(IQR 대신 중앙값 대비 30% 초과만 제거)
-    vals=[x["adjusted_price"] for x in listing]
-    med=statistics.median(vals)
-    filtered=[x for x in listing if abs(x["adjusted_price"]-med)/med<=0.30] if len(listing)>=4 else listing
-    if len(filtered)<2: filtered=listing
-
-    vals=[x["adjusted_price"] for x in filtered]
-    low=min(vals); high=max(vals)
-    spread=(high-low)/((high+low)/2)*100 if high>0 else 0
-
-    # 2건 이하 + 큰 편차: 8.5.5 안전정책 유지
-    if len(filtered)<=2 and spread>=15:
-        return {"status":"spread_hold","count":len(filtered),"listing_count":len(filtered),
-                "adopted":filtered,"references":strong,
-                "low":low,"high":high,"spread_pct":round(spread,1),
-                "confidence":"매우 낮음","error_pct":15,
-                "strong_reference_count":len(strong),
-                "reasons":[f"비교매물 {len(filtered)}건 · 가격 편차 {spread:.1f}%","단일 대표가격 산정 보류"]}
-
-    rep=round(weighted_mean_v90(filtered))
-    sims=[float(x.get("similarity_v90",0)) for x in filtered]
-    avgsim=sum(sims)/len(sims)
-    if len(filtered)>=4 and avgsim>=75 and spread<15:
-        conf="높음"; err=7; status="confirmed"
-    elif len(filtered)>=3 and avgsim>=65 and spread<20:
-        conf="보통"; err=10; status="confirmed"
-    else:
-        conf="낮음"; err=12; status="provisional"
-
-    reasons=[f"유사도 가중 비교매물 {len(filtered)}건",
-             f"평균 유사도 {avgsim:.1f}점",
-             f"가격 편차 {spread:.1f}%"]
-    if strong:
-        reasons.append(f"강한 참고자료 {len(strong)}건은 계산 제외")
-    return {"status":status,"count":len(filtered),"listing_count":len(filtered),
-            "median":rep,"market_price":rep,"low":low,"high":high,
-            "spread_pct":round(spread,1),"confidence":conf,"error_pct":err,
-            "adopted":filtered,"references":strong,
-            "strong_reference_count":len(strong),"reasons":reasons}
-
-
-def base_discount(v):
-    age=max(0,2026-v.year)
-    if age<=1 and v.km<=30000:
-        return 13.5
-    if age<=3 and v.km<=60000:
-        return 15.5
-    return 17.5
-
-def calc_auction(v,market_mid):
-    d=base_discount(v)
-
-    if v.km>180000: d+=6
-    elif v.km>150000: d+=5
-    elif v.km>120000: d+=4
-    elif v.km>100000: d+=3
-    elif v.km>80000: d+=1.5
-    elif v.km<30000: d-=0.5
-
-    d+=min(v.accident_count*0.8,4)
-
-    aa=v.accident_amount
-    if aa>=1500: d+=6
-    elif aa>=1000: d+=5
-    elif aa>=700: d+=4
-    elif aa>=500: d+=2.5
-    elif aa>=300: d+=1.5
-    elif aa>=150: d+=0.7
-
-    p=v.parts_amount
-    if p>=900: d+=4
-    elif p>=700: d+=3
-    elif p>=500: d+=2.5
-    elif p>=300: d+=1.5
-    elif p>=150: d+=0.7
-
-    d+=v.uninsured+v.use_history*1.7+v.frame*3.5+v.condition*1.3+v.liquidity*1.5+v.special*1.5
-    d=max(10,min(35,d))
-
-    auction=market_mid*(1-d/100)
-    spread=max(50,auction*0.045)
-
-    low=round((auction-spread)/10)*10
-    high=round((auction+spread)/10)*10
-    target=round(auction/10)*10
-    upper=round((auction+spread*1.25)/10)*10
-
-    verdict="보수적 접근" if d>=25 else ("조건부 검토" if d>=20 else "매입 검토 가능")
-
-    return {
-        "discount_rate":round(d,1),
-        "auction_low":int(low),
-        "auction_high":int(high),
-        "target":int(target),
-        "upper":int(upper),
-        "verdict":verdict
+    pipeline={
+      "search_results":len(raw),
+      "price_extracted":sum(1 for r in raw if prices(r["title"]+" "+r["snippet"])),
+      "vehicle_info_detected":sum(1 for r in raw if years(r["title"]+" "+r["snippet"]) or mileages(r["title"]+" "+r["snippet"])),
+      "candidate_count":len(extracted),"adopted":len(adopted),"rejected":len(rejected)
     }
 
-@app.get("/", response_class=HTMLResponse)
-def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request, "provider": SEARCH_PROVIDER})
+    if not adopted:
+        return {"status":"hold","message":"계산 가능한 비교매물을 확보하지 못했어.",
+                "pipeline":pipeline,"adopted":[],"rejected":rejected[:20],"errors":list(dict.fromkeys(errors))}
 
-@app.post("/api/analyze")
-def analyze(v: Vehicle):
-    try:
-        web=[]
-        errors=[]
-        queries=[]
-        search_stage=1
+    vals=[x["adjusted_price"] for x in adopted]
+    lo,hi=min(vals),max(vals)
+    spread=(hi-lo)/((hi+lo)/2)*100 if hi else 0
+    if len(adopted)<=2 and spread>=15:
+        return {"status":"spread_hold","message":"비교매물 수가 적고 가격 편차가 커서 공매가 산정을 보류했어.",
+          "pipeline":pipeline,"adopted":adopted,"rejected":rejected[:20],
+          "market_low":lo,"market_high":hi,"spread":round(spread,1),"errors":list(dict.fromkeys(errors))}
 
-        def run_queries(qs, max_calls):
-            nonlocal web, queries
-            existing=set(queries)
-            count=0
-            for q in qs:
-                if q in existing:
-                    continue
-                if count >= max_calls:
-                    break
-                try:
-                    web.extend(search_web(q))
-                except Exception as e:
-                    errors.append(str(e))
-                queries.append(q)
-                count += 1
+    # similarity-weighted mean
+    weights=[max(.2,x["score"]/100) for x in adopted]
+    retail=round(sum(x["adjusted_price"]*w for x,w in zip(adopted,weights))/sum(weights))
+    disc=risk_discount(v)
+    target=round(retail*(1-disc)/10)*10
+    low=round(target*.95/10)*10; high=round(target*1.05/10)*10; upper=round(target*1.07/10)*10
+    conf="높음" if len(adopted)>=4 and spread<15 else "보통" if len(adopted)>=3 and spread<20 else "낮음"
+    return {"status":"ok","pipeline":pipeline,"adopted":adopted,"rejected":rejected[:20],
+      "retail":retail,"discount":round(disc*100,1),"auction_low":low,"auction_high":high,
+      "target":target,"upper":upper,"spread":round(spread,1),"confidence":conf,
+      "errors":list(dict.fromkeys(errors))}
 
-        def recalc():
-            nonlocal web
-            web=dedupe_results(web)
-            return extract_candidates(web,v)
-
-        def verified_listing_count(items):
-            return sum(
-                1 for c in items
-                if c.get("source_type")=="listing"
-                and c.get("year") is not None
-                and c.get("mileage") is not None
-            )
-
-        run_queries(build_queries(v), 5)
-        accepted,rejected=recalc()
-
-        relaxed_names=relaxed_car_names(v)
-
-        if verified_listing_count(accepted) < 3 and len(relaxed_names) >= 2:
-            search_stage=2
-            for name in relaxed_names[1:3]:
-                run_queries(build_relaxed_queries(v,name,stage=2), 4)
-                accepted,rejected=recalc()
-                if verified_listing_count(accepted) >= 3:
-                    break
-
-        if verified_listing_count(accepted) < 3:
-            search_stage=3
-            fallback_name = relaxed_names[1] if len(relaxed_names) >= 2 else relaxed_names[0]
-            run_queries(build_relaxed_queries(v,fallback_name,stage=3), 6)
-            accepted,rejected=recalc()
-
-        if v.manual_prices:
-            for x in v.manual_prices:
-                if x and x>0:
-                    accepted.append({
-                        "price":float(x),"year":v.year,"score":30,"mileage":v.km,
-                        "title":"수동 입력 유사매물","url":"","domain":"",
-                        "reason":"사용자 확인 매물","source_type":"listing",
-                        "target_year":v.year,"target_km":v.km
-                    })
-
-        # 9.0.1 필터 복구:
-        # 검색 결과가 listing으로 분류되지 않았더라도 가격+연식 또는 가격+주행거리처럼
-        # 개별차량 단서가 있으면 저신뢰 비교후보로 한 번 더 평가한다.
-        promoted=[]
-        for c in accepted:
-            if c.get("source_type") in ("reference","unknown"):
-                title=c.get("title",""); snippet=c.get("snippet",""); url=c.get("url","")
-                if hard_reject_v90(v,title,snippet,url):
-                    continue
-                price=c.get("price")
-                yr=c.get("year")
-                km=c.get("mileage")
-                text=clean_text(f"{title} {snippet}")
-                has_vehicle_clue=bool(
-                    price and (
-                        (yr and km is not None) or
-                        (km is not None and trim_group(text)) or
-                        (yr and trim_group(text))
-                    )
-                )
-                if has_vehicle_clue:
-                    cc=dict(c)
-                    cc["source_type"]="listing"
-                    cc["reason"]="9.0.1 필터 복구 · 개별차량 단서 확인"
-                    promoted.append(cc)
-        accepted.extend(promoted)
-
-        # 복구 과정에서 같은 검색결과가 중복 승격되는 것을 방지.
-        _uniq=[]; _seen=set()
-        for c in accepted:
-            _key=((c.get("url") or "").split("?")[0].rstrip("/").lower(),
-                  clean_text(c.get("title") or "").lower(),
-                  c.get("price"),c.get("source_type"))
-            if _key in _seen:
-                continue
-            _seen.add(_key); _uniq.append(c)
-        accepted=_uniq
-
-        # 9.0.1: 명백한 오류만 제외하고 유사도 점수로 영향력을 조절.
-        rescored=[]
-        for c in accepted:
-            if c.get("source_type") not in ("listing","strong_reference"):
-                rescored.append(c); continue
-            hr=hard_reject_v90(v,c.get("title",""),c.get("snippet",""),c.get("url",""))
-            if hr:
-                cc=dict(c); cc["reason"]=hr
-                rejected.append(cc)
-                continue
-            sim,parts=similarity_v90(
-                v,c.get("title",""),c.get("snippet",""),
-                c.get("year"),c.get("mileage"),c.get("drive"),c.get("trim")
-            )
-            cc=dict(c)
-            cc["similarity_v90"]=sim
-            cc["similarity_parts"]=parts
-            # 9.0.1: 검색 스니펫의 정보 누락을 고려해 최소 유사도 기준을 48점으로 완화.
-            # 단, 명백한 동력원/세대/목록 불일치는 hard_reject_v90에서 계속 차단한다.
-            if c.get("source_type")=="listing" and sim<48:
-                cc["reason"]=f"유사도 낮음({sim}점)"
-                rejected.append(cc)
-                continue
-            cc["score"]=sim
-            rescored.append(cc)
-        accepted=rescored
-
-        market=robust_market(accepted)
-
-        if market and market.get("status")=="hold":
-            rp=market.get("reference_prices") or []
-            ref=None
-            if rp:
-                ref={"low":min(rp),"high":max(rp),"median":round(statistics.median(rp))}
-            return {
-                "ok":True,"status":"hold",
-                "message":"실제 개별매물 0건이라 공매가 산정을 보류했어. 참고자료만으로 추천 입찰가를 만들지는 않아.",
-                "market":market,"reference_market":ref,
-                "rejected":rejected[:60],"search_errors":errors
-            }
-
-        if not market:
-            return JSONResponse({
-                "ok":False,
-                "message":"단계적 검색까지 진행했지만 실제 개별매물을 확보하지 못했어. 검색자료는 보존했으며 아래 진단정보에서 제외 사유와 참고자료를 확인할 수 있어.",
-                "queries":queries,
-                "search_stage":search_stage,
-                "relaxed_names":relaxed_names,
-                "search_results":web[:50],
-                "rejected":rejected[:60],
-                "search_errors":errors
-            })
-
-        insufficient = (
-            market["listing_count"] < 3
-            or market["exact_meta_count"] < 3
-        )
-        market["market_status"] = "시세 확정 불가" if insufficient else (
-            "잠정 시세" if market["provisional"] else "시세 확정"
-        )
-
-        auction=calc_auction(v,market["median"])
-        if insufficient:
-            auction["verdict"] = "비교매물 부족 · 공매가 확정 불가"
-
-        return {
-            "ok":True,
-            "queries":queries,
-            "search_stage":search_stage,
-            "relaxed_names":relaxed_names,
-            "market":market,
-            "auction":auction,
-            "search_results":web[:50],
-            "rejected":rejected[:60],
-            "search_errors":errors
-        }
-
-    except Exception as e:
-        return JSONResponse(status_code=500, content={
-            "ok": False,
-            "message": f"분석 중 오류: {type(e).__name__}: {str(e)}",
-            "error_type": type(e).__name__,
-        })
+@app.exception_handler(Exception)
+async def all_errors(request,exc):
+    return JSONResponse(status_code=500,content={"status":"error","message":f"{type(exc).__name__}: {exc}"})
