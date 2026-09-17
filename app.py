@@ -7,7 +7,7 @@ from html import unescape
 from urllib.parse import urlparse
 import os, re, statistics, requests, traceback
 
-app = FastAPI(title="공매가 AI 9.0")
+app = FastAPI(title="공매가 AI 9.0.1")
 templates = Jinja2Templates(directory="templates")
 
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
@@ -1021,7 +1021,45 @@ def analyze(v: Vehicle):
                         "target_year":v.year,"target_km":v.km
                     })
 
-        # 9.0: 엄격한 통과/탈락 대신 명백한 오류만 제외하고 유사도 점수로 영향력을 조절.
+        # 9.0.1 필터 복구:
+        # 검색 결과가 listing으로 분류되지 않았더라도 가격+연식 또는 가격+주행거리처럼
+        # 개별차량 단서가 있으면 저신뢰 비교후보로 한 번 더 평가한다.
+        promoted=[]
+        for c in accepted:
+            if c.get("source_type") in ("reference","unknown"):
+                title=c.get("title",""); snippet=c.get("snippet",""); url=c.get("url","")
+                if hard_reject_v90(v,title,snippet,url):
+                    continue
+                price=c.get("price")
+                yr=c.get("year")
+                km=c.get("mileage")
+                text=clean_text(f"{title} {snippet}")
+                has_vehicle_clue=bool(
+                    price and (
+                        (yr and km is not None) or
+                        (km is not None and trim_group(text)) or
+                        (yr and trim_group(text))
+                    )
+                )
+                if has_vehicle_clue:
+                    cc=dict(c)
+                    cc["source_type"]="listing"
+                    cc["reason"]="9.0.1 필터 복구 · 개별차량 단서 확인"
+                    promoted.append(cc)
+        accepted.extend(promoted)
+
+        # 복구 과정에서 같은 검색결과가 중복 승격되는 것을 방지.
+        _uniq=[]; _seen=set()
+        for c in accepted:
+            _key=((c.get("url") or "").split("?")[0].rstrip("/").lower(),
+                  clean_text(c.get("title") or "").lower(),
+                  c.get("price"),c.get("source_type"))
+            if _key in _seen:
+                continue
+            _seen.add(_key); _uniq.append(c)
+        accepted=_uniq
+
+        # 9.0.1: 명백한 오류만 제외하고 유사도 점수로 영향력을 조절.
         rescored=[]
         for c in accepted:
             if c.get("source_type") not in ("listing","strong_reference"):
@@ -1038,8 +1076,9 @@ def analyze(v: Vehicle):
             cc=dict(c)
             cc["similarity_v90"]=sim
             cc["similarity_parts"]=parts
-            # 55점 미만은 계산에서 제외하되 진단에는 보존.
-            if c.get("source_type")=="listing" and sim<55:
+            # 9.0.1: 검색 스니펫의 정보 누락을 고려해 최소 유사도 기준을 48점으로 완화.
+            # 단, 명백한 동력원/세대/목록 불일치는 hard_reject_v90에서 계속 차단한다.
+            if c.get("source_type")=="listing" and sim<48:
                 cc["reason"]=f"유사도 낮음({sim}점)"
                 rejected.append(cc)
                 continue
