@@ -7,7 +7,7 @@ from html import unescape
 from urllib.parse import urlparse
 import os, re, statistics, requests, traceback
 
-app = FastAPI(title="공매가 AI 8.5.5차")
+app = FastAPI(title="공매가 AI 8.6차")
 templates = Jinja2Templates(directory="templates")
 
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
@@ -145,28 +145,44 @@ def build_queries(v, stage=1):
     ptword=pt[0] if pt else ""
     fam=facelift_family(car)
     famword={"the_all_new":"디 올 뉴","the_new":"더 뉴","all_new":"올 뉴"}.get(fam,"")
+    drive=drive_group(car) or ""
+    trim=trim_group(car) or ""
     base=" ".join(x for x in [str(v.year),famword,core,ptword] if x).strip()
+
+    # 8.6: 조건을 한꺼번에 풀지 않고 '정확한 상세매물 → 트림 완화 → 주행거리 완화 → 사이트별 확대' 순서로 탐색.
     if stage==1:
         return [
-            f'{base} {v.km}km 중고차 판매 매물',
-            f'{base} 중고차 판매가 주행거리',
-            f'site:encar.com {base} 중고차',
-            f'site:kbchachacha.com {base} 중고차',
-            f'site:kcar.com {base} 중고차',
-            f'site:reborncar.co.kr {base} 중고차',
+            f'{base} {drive} {trim} {v.km}km 중고차 판매 매물',
+            f'{base} {drive} {trim} 중고차 판매가 주행거리',
+            f'site:encar.com {base} {drive} {trim}',
+            f'site:kbchachacha.com {base} {drive} {trim}',
+            f'site:kcar.com {base} {drive} {trim}',
         ]
     if stage==2:
         return [
-            f'{base} 중고차 매물',
-            f'{v.year} {core} {ptword} 판매중 중고차',
-            f'{v.year-1} {core} {ptword} 중고차 매물',
-            f'{v.year+1} {core} {ptword} 중고차 매물',
-            f'{core} {ptword} 최초등록 주행거리 판매가',
+            f'{base} {drive} 중고차 매물',
+            f'{base} {drive} 판매중 주행거리 가격',
+            f'site:encar.com {base} {drive}',
+            f'site:kbchachacha.com {base} {drive}',
+            f'site:kcar.com {base} {drive}',
+            f'site:reborncar.co.kr {base} {drive}',
+        ]
+    if stage==3:
+        return [
+            f'{base} 중고차 상세 매물',
+            f'{base} 최초등록 주행거리 판매가',
+            f'{v.year-1} {famword} {core} {ptword} 중고차 매물',
+            f'{v.year+1} {famword} {core} {ptword} 중고차 매물',
+            f'site:encar.com {core} {ptword} {v.year}',
+            f'site:kbchachacha.com {core} {ptword} {v.year}',
+            f'site:kcar.com {core} {ptword} {v.year}',
+            f'site:reborncar.co.kr {core} {ptword} {v.year}',
         ]
     return [
-        f'{base} 중고차 가격',
-        f'{core} {ptword} 중고차 시세',
-        f'{core} {ptword} 중고 가격 판매가',
+        f'{base} 중고차 판매',
+        f'{core} {ptword} 중고차 판매가 주행거리',
+        f'{core} {ptword} 중고차 매물 {v.year}',
+        f'{core} {ptword} 중고차 가격',
     ]
 
 def relaxed_car_names(v):
@@ -524,6 +540,25 @@ def strong_reference_ok(text, v, model_ok, pt_match, source_drive, source_trim):
 
     return detail >= 1 and any(x in t for x in ["중고 가격","판매가","중고차 가격","만원"])
 
+
+def listing_detail_quality(title, snippet, url):
+    """0~5. 목록/카테고리 페이지보다 차량 상세매물을 우선하기 위한 품질점수."""
+    text=clean_text(f"{title} {snippet}")
+    u=(url or "").lower()
+    score=0
+    if re.search(r"(20\d{2})",text): score+=1
+    if re.search(r"\d[\d,]{2,}\s*km",text,re.I): score+=1
+    if re.search(r"\d[\d,]{2,}\s*만원",text): score+=1
+    if re.search(r"(detail|vehicle|car/|cars/|usedcar/|product|view)",u): score+=1
+    if re.search(r"(판매중|인증중고차|차량번호|최초등록)",text): score+=1
+    # 목록성 문구는 감점
+    if re.search(r"(중고차\s*\d+\s*대|시세표|가격표|전체매물|검색결과|목록)",text): score-=2
+    return score
+
+def likely_listing_collection(title, snippet, url):
+    text=clean_text(f"{title} {snippet}")
+    return bool(re.search(r"(중고차\s*\d+\s*대|전체매물|검색결과|매물목록|시세표|가격표)",text))
+
 def _extract_candidates_core(results,v):
     accepted=[]; rejected=[]
     patt=re.compile(r"(?<![\d,])(\d{1,3}(?:,\d{3})+|\d{3,5})\s*만\s*원")
@@ -583,7 +618,15 @@ def _extract_candidates_core(results,v):
                 reason=f"연식 범위 초과({yr})"
             elif km and abs(km-v.km)>40000:
                 reason=f"주행거리 범위 초과({km:,}km)"
-            elif stype in ("unknown","reference"):
+            # 8.6: '쏘렌토 중고차 68대' 같은 목록 페이지는 실제 개별매물로 인정하지 않는다.
+            if stype=="listing" and likely_listing_collection(title, snippet, url):
+                stype="reference"
+                reason="목록/검색결과 페이지 · 개별매물 아님"
+            elif stype=="listing" and listing_detail_quality(title, snippet, url)<2:
+                stype="reference"
+                reason="개별매물 상세정보 부족"
+
+            if stype in ("unknown","reference"):
                 if stype=="reference" and stale_reference(text):
                     reason="오래된 시세자료"
                 elif strong_reference_ok(text, v, model_ok, pt_match, source_drive, source_trim):
@@ -593,6 +636,7 @@ def _extract_candidates_core(results,v):
 
             score=min(core_hits,3)*4 + min(kw_hits,4)
             if stype=="listing":
+                score += max(0, listing_detail_quality(title, snippet, url))*3
                 score += 7
             elif stype=="strong_reference":
                 score += 2
@@ -970,6 +1014,23 @@ def analyze(v: Vehicle):
                         "reason":"사용자 확인 매물","source_type":"listing",
                         "target_year":v.year,"target_km":v.km
                     })
+
+        # 8.6: 여러 검색어에서 같은 상세매물이 반복 노출되는 경우 1건으로만 계산.
+        uniq=[]
+        seen=set()
+        for c in accepted:
+            if c.get("source_type")=="listing":
+                key=((c.get("url") or "").split("?")[0].rstrip("/").lower(),
+                     clean_text(c.get("title") or "").lower(),
+                     c.get("price"))
+            else:
+                key=(c.get("source_type"),(c.get("url") or "").split("?")[0].rstrip("/").lower(),
+                     clean_text(c.get("title") or "").lower(),c.get("price"))
+            if key in seen:
+                continue
+            seen.add(key)
+            uniq.append(c)
+        accepted=uniq
 
         market=robust_market(accepted)
 
