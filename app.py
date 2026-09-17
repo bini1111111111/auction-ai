@@ -7,7 +7,7 @@ from html import unescape
 from urllib.parse import urlparse
 import os, re, statistics, requests, traceback
 
-app = FastAPI(title="공매가 AI 8.6.2차")
+app = FastAPI(title="공매가 AI 8.6.3차")
 templates = Jinja2Templates(directory="templates")
 
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "none").lower()
@@ -855,6 +855,57 @@ def weighted_median(values):
             return value
     return arr[-1][0]
 
+
+def recover_listing_candidates(cands, v):
+    """8.6.3 복구패스: 엄격 필터 뒤에도 남은 검색자료를 개별차량 증거로 재검증한다.
+    모델/동력원/세대가 명백히 틀린 자료와 목록페이지는 절대 복구하지 않는다.
+    """
+    out=[]
+    target_model=" ".join(core_model_tokens(v.car)).lower()
+    target_pt=powertrain_group(v.car)
+    target_fam=facelift_family(v.car)
+    for c in cands:
+        title=c.get("title",""); snippet=c.get("snippet",""); url=c.get("url","")
+        text=clean_text(f"{title} {snippet}")
+        if likely_listing_collection(title,snippet,url):
+            continue
+        # hard mismatches remain hard rejects
+        if target_model:
+            toks=[x for x in target_model.split() if len(x)>=2]
+            if toks and not any(t in text.lower() for t in toks):
+                continue
+        rpt=powertrain_group(text)
+        if target_pt and rpt and target_pt[0] != rpt[0]:
+            continue
+        rf=facelift_family(text)
+        if target_fam and rf and target_fam != rf:
+            continue
+        if (not target_fam) and rf:
+            continue
+
+        price=c.get("price")
+        yr=c.get("year")
+        km=c.get("mileage")
+        ok,q,why=can_promote_listing_candidate(
+            title,snippet,url,yr,km,price,trim_group(v.car),drive_group(v.car)
+        )
+        if not ok:
+            continue
+        cc=dict(c)
+        cc["source_type"]="listing_candidate"
+        cc["score"]=max(20,cc.get("score",0)-8)
+        cc["reason"]="복구 실매물 후보 · " + ",".join(why)
+        out.append(cc)
+
+    # exact duplicate suppression
+    uniq=[]; seen=set()
+    for c in sorted(out,key=lambda x:-x.get("score",0)):
+        key=((c.get("url") or "").split("?")[0].rstrip("/").lower(),
+             clean_text(c.get("title") or "").lower(),c.get("price"))
+        if key in seen: continue
+        seen.add(key); uniq.append(c)
+    return uniq[:5]
+
 def robust_market(cands):
     if not cands:
         return None
@@ -1124,6 +1175,16 @@ def analyze(v: Vehicle):
             uniq.append(c)
         accepted=uniq
 
+        # 8.6.3: 엄격 판정 결과 실제/후보가 하나도 없으면 검색자료를 한 번 더 재검증.
+        usable=[c for c in accepted if c.get("source_type") in ("listing","listing_candidate")]
+        if not usable:
+            recovery_pool=list(accepted)
+            # rejected 항목도 원본 필드가 보존된 경우에 한해 재검증한다.
+            recovery_pool += [c for c in rejected if isinstance(c,dict)]
+            recovered=recover_listing_candidates(recovery_pool,v)
+            if recovered:
+                accepted.extend(recovered)
+
         market=robust_market(accepted)
 
         # 8.5.5: 표본이 2건 이하인데 가격 편차가 15% 이상이면
@@ -1159,7 +1220,7 @@ def analyze(v: Vehicle):
         if not market:
             return JSONResponse({
                 "ok":False,
-                "message":"단계적 검색까지 진행했지만 실제 개별매물을 확보하지 못했어. 검색자료는 보존했으며 아래 진단정보에서 제외 사유와 참고자료를 확인할 수 있어.",
+                "message":"단계적 검색과 실매물 후보 복구검증까지 진행했지만 계산 가능한 개별차량 자료를 확보하지 못했어. 이 경우에는 참고자료만으로 공매가를 만들지 않아.",
                 "queries":queries,
                 "search_stage":search_stage,
                 "relaxed_names":relaxed_names,
