@@ -23,7 +23,20 @@ class Vehicle(BaseModel):
     special_body:str="아님"
     manual_prices:str=""
 
-def clean(s): return re.sub(r"\s+"," ",str(s or "")).strip()
+def clean(s):
+    if isinstance(s, dict):
+        s = s.get("url") or s.get("value") or s.get("text") or str(s)
+    elif isinstance(s, (list, tuple)):
+        s = " ".join(clean(x) for x in s)
+    return re.sub(r"\s+"," ",str(s or "")).strip()
+
+def safe_url(v):
+    if isinstance(v, dict):
+        v = v.get("url") or v.get("value") or ""
+    elif isinstance(v, (list, tuple)):
+        v = v[0] if v else ""
+    return clean(v)
+
 def domain(u):
     try:return urlparse(u).netloc.replace("www.","")
     except:return ""
@@ -113,8 +126,9 @@ def brave(q):
         r.raise_for_status()
         rows=[]
         for x in r.json().get("web",{}).get("results",[]):
+            u=safe_url(x.get("url",""))
             rows.append({"title":clean(x.get("title")),"snippet":clean(x.get("description")),
-                         "url":x.get("url",""),"source":domain(x.get("url",""))})
+                         "url":u,"source":domain(u)})
         return rows,""
     except Exception as e:return [],f"{type(e).__name__}: {e}"
 
@@ -187,7 +201,7 @@ def analyze(v:Vehicle):
     # dedupe raw
     seen=set(); unique=[]
     for r in raw:
-        k=((r["url"] or "").split("?")[0].rstrip("/"),r["title"])
+        k=(safe_url(r.get("url")).split("?")[0].rstrip("/"), clean(r.get("title")))
         if k in seen:continue
         seen.add(k);unique.append(r)
     raw=unique
@@ -219,7 +233,7 @@ def analyze(v:Vehicle):
     # dedupe calculation rows
     seen=set(); adopted=[]
     for x in sorted(extracted,key=lambda z:-z["score"]):
-        k=(x.get("url"),x["price"])
+        k=(safe_url(x.get("url")), int(x["price"]))
         if k in seen:continue
         seen.add(k);adopted.append(x)
     adopted=adopted[:8]
